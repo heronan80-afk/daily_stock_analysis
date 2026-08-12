@@ -19,6 +19,10 @@ Daily Stock Analysis - FastAPI 后端服务入口
 """
 
 import logging
+import os
+
+# Suppress tqdm progress bars from third-party libraries in production.
+os.environ.setdefault("TQDM_DISABLE", "true")
 
 from src.config import setup_env, get_config
 from src.logging_config import setup_logging

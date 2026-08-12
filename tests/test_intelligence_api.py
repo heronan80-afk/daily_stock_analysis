@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import requests
 from fastapi.testclient import TestClient
 
+import src.auth as auth
 from api.app import create_app
 from src.config import Config
 from src.storage import DatabaseManager
@@ -26,6 +27,8 @@ class IntelligenceApiTestCase(unittest.TestCase):
         os.environ["DATABASE_PATH"] = os.path.join(self._temp_dir.name, "api_intel.db")
         Config._instance = None
         DatabaseManager.reset_instance()
+        # 本地非桌面模式默认认证开启，测试不登录会全部 401；强制关闭认证状态
+        auth._auth_enabled = False
         self._dns_patcher = patch(
             "src.services.intelligence_service.socket.getaddrinfo",
             return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
@@ -38,6 +41,7 @@ class IntelligenceApiTestCase(unittest.TestCase):
         DatabaseManager.reset_instance()
         Config._instance = None
         os.environ.pop("DATABASE_PATH", None)
+        auth._auth_enabled = None
         self._temp_dir.cleanup()
 
     def _mock_response(self):

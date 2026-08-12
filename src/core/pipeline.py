@@ -528,6 +528,22 @@ class StockAnalysisPipeline:
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
+            # Step 3b: Kronos 时序预测 — 与趋势分析并行，供下游消费
+            kronos_prediction = None
+            try:
+                from src.services.kronos_service import KronosService
+                ks = KronosService()
+                if ks.is_available:
+                    kronos_prediction = ks.predict(code, str(end_date))
+                    if kronos_prediction and kronos_prediction.available:
+                        logger.info(
+                            f"{stock_name}({code}) Kronos 预测: {kronos_prediction.direction}, "
+                            f"置信度={kronos_prediction.direction_confidence}%, "
+                            f"涨跌幅={kronos_prediction.pred_pct_change:+.2f}%"
+                        )
+            except Exception as e:
+                logger.debug(f"{stock_name}({code}) Kronos 预测跳过: {e}")
+
             if use_agent:
                 logger.info(f"{stock_name}({code}) 启用 Agent 模式进行分析")
                 self._emit_progress(58, f"{stock_name}：正在切换 Agent 分析链路")
@@ -540,6 +556,7 @@ class StockAnalysisPipeline:
                     chip_data,
                     fundamental_context,
                     trend_result,
+                    kronos_prediction=kronos_prediction,
                     market_phase_context=market_phase_context_dict,
                     market_phase_summary=market_phase_summary,
                     daily_market_context=daily_market_context,
@@ -631,12 +648,13 @@ class StockAnalysisPipeline:
                     'yesterday': {}
                 }
             
-            # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
+            # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、Kronos 信号、股票名称）
             enhanced_context = self._enhance_context(
-                context, 
-                realtime_quote, 
+                context,
+                realtime_quote,
                 chip_data,
                 trend_result,
+                kronos_prediction,  # 传入 Kronos 预测信号
                 stock_name,  # 传入股票名称
                 fundamental_context,
                 market_phase_context=market_phase_context_dict,
@@ -842,6 +860,7 @@ class StockAnalysisPipeline:
         realtime_quote,
         chip_data: Optional[ChipDistribution],
         trend_result: Optional[TrendAnalysisResult],
+        kronos_prediction: Any = None,
         stock_name: str = "",
         fundamental_context: Optional[Dict[str, Any]] = None,
         market_phase_context: Optional[Dict[str, Any]] = None,
@@ -849,8 +868,8 @@ class StockAnalysisPipeline:
     ) -> Dict[str, Any]:
         """
         增强分析上下文
-        
-        将实时行情、筹码分布、趋势分析结果、股票名称添加到上下文中
+
+        将实时行情、筹码分布、趋势分析结果、Kronos 预测信号、股票名称添加到上下文中
         
         Args:
             context: 原始上下文
@@ -909,12 +928,17 @@ class StockAnalysisPipeline:
         # 添加筹码分布
         if chip_data:
             current_price = getattr(realtime_quote, 'price', 0) if realtime_quote else 0
+            chip_date = getattr(chip_data, 'date', '') or ''
+            chip_source = getattr(chip_data, 'source', '') or ''
+            # 命中 last-known-good 缓存时 date 会是历史交易日，透传给 LLM 与报告标注时效
             enhanced['chip'] = {
                 'profit_ratio': chip_data.profit_ratio,
                 'avg_cost': chip_data.avg_cost,
                 'concentration_90': chip_data.concentration_90,
                 'concentration_70': chip_data.concentration_70,
                 'chip_status': chip_data.get_chip_status(current_price or 0),
+                'date': chip_date,
+                'source': chip_source,
             }
         
         # 添加趋势分析结果
@@ -931,6 +955,16 @@ class StockAnalysisPipeline:
                 'signal_score': trend_result.signal_score,
                 'signal_reasons': trend_result.signal_reasons,
                 'risk_factors': trend_result.risk_factors,
+            }
+
+        # 添加 Kronos 时序预测信号（与趋势分析交叉验证）
+        if kronos_prediction and kronos_prediction.available:
+            enhanced['kronos_signal'] = {
+                'direction': kronos_prediction.direction,
+                'direction_confidence': kronos_prediction.direction_confidence,
+                'pred_pct_change': kronos_prediction.pred_pct_change,
+                'pred_days': kronos_prediction.pred_days,
+                'lookback': kronos_prediction.lookback,
             }
 
         # Issue #234：盘中分析使用实时 OHLC 与趋势 MA 覆盖 today。
@@ -1202,6 +1236,7 @@ class StockAnalysisPipeline:
         chip_data: Optional[ChipDistribution],
         fundamental_context: Optional[Dict[str, Any]] = None,
         trend_result: Optional[TrendAnalysisResult] = None,
+        kronos_prediction: Any = None,
         *,
         market_phase_context: Optional[Dict[str, Any]] = None,
         market_phase_summary: Optional[Dict[str, Any]] = None,
@@ -1249,6 +1284,12 @@ class StockAnalysisPipeline:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
             if trend_result:
                 initial_context["trend_result"] = self._safe_to_dict(trend_result)
+            if kronos_prediction and kronos_prediction.available:
+                from dataclasses import asdict
+                ks_dict = asdict(kronos_prediction)
+                # 去掉内部字段（预测序列），只保留信号字段
+                ks_dict = {k: v for k, v in ks_dict.items() if not k.startswith('_')}
+                initial_context["kronos_signal"] = ks_dict
 
             # Agent path: inject social sentiment as news_context so both
             # executor (_build_user_message) and orchestrator (ctx.set_data)

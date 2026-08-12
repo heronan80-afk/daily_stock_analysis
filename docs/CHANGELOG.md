@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 - [新功能] 周期复盘（周报/月报）：每周五/月末交易日自动生成大盘+板块联动报告，聚合指数表现、板块强弱、情绪趋势和资金流向，通过飞书推送。
-- [测试] 新增 `tests/test_periodic_review.py` 覆盖月末判断、highlights 构建、情绪轮动检测、模板渲染和调度器分发逻辑。
+- [测试] 新增 `tests/test_periodic_review.py`
+- [改进] 买入信号因资金流数据缺失被降级为持有时，同步将趋势方向置为「震荡」，避免「看多+观望」的矛盾信号误导用户。
+- [改进] 资金流缺失时买入降级后的评分上限从 59 降至 50，使评分更准确地反映真实置信度（中性而非偏多）。
+- [测试] decision_stability 新增 2 个测试用例，覆盖买入降级后的趋势中性化和评分上限校准。 覆盖月末判断、highlights 构建、情绪轮动检测、模板渲染和调度器分发逻辑。
+- [改进] 筹码分布 last-known-good 磁盘缓存：东财 `stock_cyq_em` 断连失败时回退到最近一次成功值（≤7 天），报告标注"筹码数据截至 YYYY-MM-DD"避免误导；全源失败且无缓存时冷却后补漏重试一轮连接类数据源。
+- [测试] 新增筹码缓存读写/过期、连接类失败补漏重试、data_date 透传相关测试用例。
+- [测试] 修复 `test_pipeline_realtime_indicators` 中 `_enhance_context` 调用：Kronos 集成后第 5 个位置参数变为 `kronos_prediction`，8 个用例把股票名当位置参数传入导致 `AttributeError`，改为 `stock_name=` 关键字传参。
 
 ## [3.25.0] - 2026-07-03
 

@@ -67,15 +67,26 @@ def _get_credential_path() -> Path:
 
 
 def _is_auth_enabled_from_env() -> bool:
-    """Read ADMIN_AUTH_ENABLED from .env file."""
+    """Read ADMIN_AUTH_ENABLED from .env file.
+
+    安全默认值：桌面模式（DSA_DESKTOP_MODE=true）默认为关闭（本机使用无需认证）；
+    非桌面模式（服务端/Web 部署）默认开启，防止匿名访问 API。
+    显式设置 ADMIN_AUTH_ENABLED=true/false 始终优先。
+    """
     _ensure_env_loaded()
     env_file = os.getenv("ENV_FILE")
     env_path = Path(env_file) if env_file else Path(__file__).resolve().parent.parent / ".env"
-    if not env_path.exists():
+    values = {}
+    if env_path.exists():
+        values = dotenv_values(env_path)
+    raw = (values.get("ADMIN_AUTH_ENABLED") or os.getenv("ADMIN_AUTH_ENABLED") or "").strip().lower()
+    if raw in ("true", "1", "yes"):
+        return True
+    if raw in ("false", "0", "no"):
         return False
-    values = dotenv_values(env_path)
-    val = (values.get("ADMIN_AUTH_ENABLED") or "").strip().lower()
-    return val in ("true", "1", "yes")
+    # 未显式设置时：桌面模式默认关闭，服务端模式默认开启
+    is_desktop = os.getenv("DSA_DESKTOP_MODE", "").lower() == "true"
+    return not is_desktop
 
 
 def rotate_session_secret() -> bool:

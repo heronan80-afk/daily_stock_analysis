@@ -122,6 +122,27 @@ class TestBuildChipStructureFromData(unittest.TestCase):
         out = _build_chip_structure_from_data(d)
         self.assertEqual(out["avg_cost"], "N/A")
 
+    def test_from_object_carries_data_date(self) -> None:
+        chip = ChipDistribution(
+            code="600519",
+            date="2026-08-10",
+            profit_ratio=0.567,
+            avg_cost=1850.5,
+            concentration_90=0.12,
+        )
+        out = _build_chip_structure_from_data(chip)
+        self.assertEqual(out["data_date"], "2026-08-10")
+
+    def test_from_dict_carries_data_date(self) -> None:
+        d = {"profit_ratio": 0.5, "avg_cost": 25.6, "concentration_90": 0.15, "date": "2026-08-08"}
+        out = _build_chip_structure_from_data(d)
+        self.assertEqual(out["data_date"], "2026-08-08")
+
+    def test_no_date_yields_empty_data_date(self) -> None:
+        d = {"profit_ratio": 0.5, "avg_cost": 25.6, "concentration_90": 0.15}
+        out = _build_chip_structure_from_data(d)
+        self.assertEqual(out["data_date"], "")
+
 
 class TestFillChipStructureIfNeeded(unittest.TestCase):
     """Tests for fill_chip_structure_if_needed."""
@@ -213,6 +234,25 @@ class TestFillChipStructureIfNeeded(unittest.TestCase):
         self.assertEqual(cs["avg_cost"], 1900.0)
         self.assertEqual(cs["concentration"], "10.00%")
         self.assertEqual(cs["chip_health"], "健康")
+
+    def test_fill_backfills_data_date(self) -> None:
+        result = self._make_result(
+            dashboard={
+                "data_perspective": {
+                    "chip_structure": {"profit_ratio": 0, "avg_cost": 0, "concentration": 0, "chip_health": ""}
+                }
+            }
+        )
+        chip = ChipDistribution(
+            code="600519",
+            date="2026-08-09",
+            profit_ratio=0.67,
+            avg_cost=1850.0,
+            concentration_90=0.11,
+        )
+        fill_chip_structure_if_needed(result, chip)
+        cs = result.dashboard["data_perspective"]["chip_structure"]
+        self.assertEqual(cs["data_date"], "2026-08-09")
 
     def test_data_perspective_null_handled(self) -> None:
         """When LLM returns data_perspective: null, fill should still work."""

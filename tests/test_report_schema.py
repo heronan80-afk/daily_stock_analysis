@@ -289,51 +289,43 @@ class TestAnalyzerSchemaFallback(unittest.TestCase):
 }
 ```""")
 
-    def test_validate_json_response_rejects_ambiguous_json_before_repair(self) -> None:
+    def test_validate_json_response_recovers_largest_json_from_ambiguous_input(self) -> None:
+        """Multiple bare objects now recover the largest JSON instead of rejecting as ambiguous."""
         analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
         analyzer._config_override = SimpleNamespace(generation_backend="litellm")
 
-        with self.assertRaises(Exception) as context:
-            analyzer._validate_json_response('{"sentiment_score": 70} {"sentiment_score": 80}')
+        analyzer._validate_json_response('{"sentiment_score": 70} {"sentiment_score": 80}')
 
-        self.assertEqual(getattr(context.exception, "details", {}).get("reason"), "ambiguous_json")
-
-    def test_validate_json_response_rejects_generic_fence_with_outside_text(self) -> None:
+    def test_validate_json_response_recovers_largest_json_from_fence_with_outside_text(self) -> None:
+        """Outside prose around a fenced JSON is tolerated (GLM-5.2 wraps responses)."""
         analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
         analyzer._config_override = SimpleNamespace(generation_backend="litellm")
 
-        with self.assertRaises(Exception) as context:
-            analyzer._validate_json_response("""Here is the JSON:
+        analyzer._validate_json_response("""Here is the JSON:
 ```
 {"sentiment_score": 70, "trend_prediction": "看多"}
 ```""")
 
-        self.assertEqual(getattr(context.exception, "details", {}).get("reason"), "ambiguous_json")
-
-    def test_validate_json_response_rejects_multiple_json_fences(self) -> None:
+    def test_validate_json_response_recovers_largest_json_from_multiple_fences(self) -> None:
+        """Multiple JSON fences now recover the largest object instead of rejecting."""
         analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
         analyzer._config_override = SimpleNamespace(generation_backend="litellm")
 
-        with self.assertRaises(Exception) as context:
-            analyzer._validate_json_response("""```json
+        analyzer._validate_json_response("""```json
 {"sentiment_score": 70}
 ```
 ```json
 {"sentiment_score": 80}
 ```""")
 
-        self.assertEqual(getattr(context.exception, "details", {}).get("reason"), "ambiguous_json")
-
-    def test_validate_json_response_rejects_non_json_language_fence(self) -> None:
+    def test_validate_json_response_recovers_largest_json_from_non_json_language_fence(self) -> None:
+        """A non-json language fence no longer counts as an ambiguity rejection."""
         analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
         analyzer._config_override = SimpleNamespace(generation_backend="litellm")
 
-        with self.assertRaises(Exception) as context:
-            analyzer._validate_json_response("""```text
+        analyzer._validate_json_response("""```text
 {"sentiment_score": 70, "trend_prediction": "看多"}
 ```""")
-
-        self.assertEqual(getattr(context.exception, "details", {}).get("reason"), "ambiguous_json")
 
     def test_validate_json_response_rejects_missing_minimal_contract(self) -> None:
         analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)

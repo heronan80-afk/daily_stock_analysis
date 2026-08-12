@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import src.auth as auth
 from api.app import create_app
 from api.deps import get_database_manager
 
@@ -68,6 +69,13 @@ class FakeUsageDbManager:
 
 
 class UsageDashboardApiTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        # 本地非桌面模式默认认证开启，测试不登录会 401；强制关闭认证状态
+        auth._auth_enabled = False
+
+    def tearDown(self) -> None:
+        auth._auth_enabled = None
+
     def test_dashboard_returns_token_summary_and_recent_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app(static_dir=Path(temp_dir))

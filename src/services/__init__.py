@@ -19,8 +19,14 @@ def __getattr__(name: str):
         "AnalysisService": "src.services.analysis_service",
         "BacktestService": "src.services.backtest_service",
         "HistoryService": "src.services.history_service",
+        "KronosService": "src.services.kronos_service",
+        "SectorAnalysisService": "src.services.sector_analysis_service",
+        "SectorAnalysisReportSender": "src.services.sector_analysis_report_sender",
+        "SectorAnalysisScheduler": "src.services.sector_analysis_scheduler",
         "StockService": "src.services.stock_service",
         "TaskService": "src.services.task_service",
+        "create_sector_analysis_report_sender": "src.services.sector_analysis_report_sender",
+        "create_sector_analysis_scheduler": "src.services.sector_analysis_scheduler",
         "get_task_service": "src.services.task_service",
     }
     if name in _lazy_map:
@@ -34,7 +40,13 @@ __all__ = [
     "AnalysisService",
     "BacktestService",
     "HistoryService",
+    "KronosService",
+    "SectorAnalysisService",
+    "SectorAnalysisReportSender",
+    "SectorAnalysisScheduler",
     "StockService",
     "TaskService",
+    "create_sector_analysis_report_sender",
+    "create_sector_analysis_scheduler",
     "get_task_service",
 ]

@@ -29,6 +29,10 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+# Suppress tqdm progress bars from third-party libraries (efinance, akshare)
+# that pollute stderr logs in scheduled/production mode.
+os.environ.setdefault("TQDM_DISABLE", "true")
+
 from dotenv import dotenv_values
 from src.config import setup_env
 
@@ -1166,6 +1170,58 @@ def _reload_runtime_config() -> Config:
     return get_config()
 
 
+def _cleanup_http_connections() -> None:
+    """释放分析任务遗留的 HTTP 连接，避免文件描述符泄漏积累。
+
+    每次定时任务执行后调用，关闭所有 urllib3 / requests / aiohttp 连接池，
+    防止 CLOSE_WAIT 连接持续累积导致 [Errno 24] Too many open files。
+    """
+    import gc
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        count = 0
+        # 1. 关闭所有 urllib3 连接池
+        for obj in gc.get_objects():
+            module_name = getattr(type(obj), "__module__", "")
+            if "urllib3" in module_name and hasattr(obj, "close"):
+                try:
+                    obj.close()
+                    count += 1
+                except Exception:
+                    pass
+        if count:
+            logger.info("连接清理: 关闭 %d 个 urllib3 对象", count)
+    except Exception:
+        pass
+
+    try:
+        # 2. 关闭 requests 适配器
+        import requests.adapters
+        for obj in gc.get_objects():
+            if isinstance(obj, requests.adapters.HTTPAdapter):
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        # 3. 关闭 aiohttp ClientSession
+        import aiohttp
+        for obj in gc.get_objects():
+            if isinstance(obj, aiohttp.ClientSession) and not obj.closed:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def _build_schedule_time_provider(default_schedule_time: str):
     """Read the latest schedule time directly from the active config file.
 
@@ -1466,7 +1522,11 @@ def main() -> int:
 
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
-                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                try:
+                    run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                finally:
+                    # 清理网络连接，避免文件描述符泄漏
+                    _cleanup_http_connections()
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):

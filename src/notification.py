@@ -1328,9 +1328,14 @@ class NotificationService(
                             ])
                         else:
                             chip_health = localize_chip_health(chip_data.get('chip_health', 'N/A'), report_language)
+                            # 命中 last-known-good 缓存时 data_date 是历史交易日，标注时效避免误导
+                            data_date = chip_data.get('data_date') or chip_data.get('date')
+                            date_suffix = ""
+                            if data_date and data_date != datetime.now().strftime('%Y-%m-%d'):
+                                date_suffix = f"（筹码数据截至 {data_date}）"
                             report_lines.extend([
                                 f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
-                                f"{chip_data.get('concentration', 'N/A')} {chip_health}",
+                                f"{chip_data.get('concentration', 'N/A')} {chip_health}{date_suffix}",
                                 "",
                             ])
                     else:

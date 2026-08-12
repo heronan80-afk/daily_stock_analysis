@@ -1,11 +1,27 @@
 # -*- coding: utf-8 -*-
 """Regression tests for chip distribution provider fallback."""
 
+import json
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from data_provider.base import DataFetcherManager
+import pytest
+
+from data_provider.base import (
+    DataFetcherManager,
+    _is_chip_connection_error,
+    _load_chip_cache,
+    _save_chip_cache,
+)
 from data_provider.realtime_types import ChipDistribution, get_chip_circuit_breaker
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chip_cache(tmp_path):
+    """把筹码磁盘缓存重定向到临时目录，避免测试污染真实 data/cache/chip/。"""
+    with patch("data_provider.base._CHIP_CACHE_DIR", tmp_path):
+        yield
 
 
 class _ChipFetcher:
@@ -155,3 +171,99 @@ def test_manager_records_failed_chip_attempt_and_falls_back_to_next_fetcher():
         "provider_run_started",
         "provider_run",
     ]
+
+
+def test_success_writes_last_known_good_cache():
+    get_chip_circuit_breaker().reset()
+    valid_chip = ChipDistribution(
+        code="600519",
+        date="2026-08-11",
+        profit_ratio=0.61,
+        avg_cost=12.3,
+        concentration_90=0.13,
+    )
+    manager = DataFetcherManager(fetchers=[_ChipFetcher("ValidFetcher", 0, valid_chip)])
+
+    with patch("src.config.get_config", return_value=SimpleNamespace(enable_chip_distribution=True)):
+        chip = manager.get_chip_distribution("600519")
+
+    assert chip is valid_chip
+    cached = _load_chip_cache("600519")
+    assert cached is not None
+    assert cached.date == "2026-08-11"
+    assert cached.profit_ratio == 0.61
+    assert cached.avg_cost == 12.3
+    assert cached.concentration_90 == 0.13
+
+
+def test_failure_falls_back_to_cached_chip_without_retry():
+    get_chip_circuit_breaker().reset()
+    cached_chip = ChipDistribution(
+        code="600519",
+        date="2026-08-10",
+        profit_ratio=0.55,
+        avg_cost=11.8,
+        concentration_90=0.14,
+    )
+    _save_chip_cache("600519", cached_chip)
+    failing_fetcher = _FailingChipFetcher("FailingFetcher", 0, ConnectionError("Remote end closed"))
+    manager = DataFetcherManager(fetchers=[failing_fetcher])
+
+    with patch("src.config.get_config", return_value=SimpleNamespace(enable_chip_distribution=True)):
+        chip = manager.get_chip_distribution("600519")
+
+    assert chip is not None
+    assert chip.date == "2026-08-10"
+    # 有可用缓存时不烧补漏重试的时间，只请求一次
+    assert failing_fetcher.calls == 1
+
+
+def test_connection_error_triggers_retry_when_no_cache():
+    get_chip_circuit_breaker().reset()
+    valid_chip = ChipDistribution(
+        code="600519",
+        profit_ratio=0.61,
+        avg_cost=12.3,
+        concentration_90=0.13,
+    )
+
+    class _FlakyFetcher(_ChipFetcher):
+        def get_chip_distribution(self, stock_code):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("Remote end closed connection without response")
+            return self._result
+
+    flaky = _FlakyFetcher("FlakyFetcher", 0, valid_chip)
+    manager = DataFetcherManager(fetchers=[flaky])
+
+    with patch("data_provider.base._CHIP_RETRY_COOLDOWN_SECONDS", 0.0), patch(
+        "src.config.get_config", return_value=SimpleNamespace(enable_chip_distribution=True)
+    ):
+        chip = manager.get_chip_distribution("600519")
+
+    assert chip is valid_chip
+    assert flaky.calls == 2
+
+
+def test_expired_cache_returns_none(tmp_path):
+    _save_chip_cache(
+        "600519",
+        ChipDistribution(code="600519", profit_ratio=0.5, avg_cost=10.0, concentration_90=0.12),
+    )
+    path = tmp_path / "600519.json"
+    with open(path, "r", encoding="utf-8") as f:
+        d = json.load(f)
+    d["saved_at"] = time.time() - 8 * 24 * 3600  # 8 天前，超过 7 天阈值
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+
+    assert _load_chip_cache("600519") is None
+
+
+def test_is_chip_connection_error_detection():
+    assert _is_chip_connection_error("ConnectionError", "Remote end closed connection without response")
+    assert _is_chip_connection_error("RetryError", "RetryError[... state=finished raised ConnectionError]")
+    assert _is_chip_connection_error("Timeout", "timed out")
+    assert not _is_chip_connection_error("RuntimeError", "no permission")
+    assert not _is_chip_connection_error("", "empty or incomplete chip distribution")

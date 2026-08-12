@@ -28,7 +28,13 @@ _ALLOWED_LOG_LEVELS = {
     'ERROR': logging.ERROR,
     'CRITICAL': logging.CRITICAL,
 }
-_DEFAULT_LITELLM_LOG_LEVEL = 'WARNING'
+_DEFAULT_LITELLM_LOG_LEVEL = "WARNING"
+
+# Track the date when logging was last initialized, so long-running
+# processes (e.g. launchd scheduler) can detect day rollover and re-open
+# date-stamped log files without restarting.
+_LOG_SETUP_DATE: Optional[str] = None
+_LOG_SETUP_KWARGS: Optional[dict] = None
 
 
 class RelativePathFormatter(logging.Formatter):
@@ -186,6 +192,18 @@ def setup_logging(
         rel_debug_log_file = debug_log_file
 
     logging.info(f"日志系统初始化完成，日志目录: {rel_log_path}")
+
+    # Record setup state for day-rollover detection
+    global _LOG_SETUP_DATE, _LOG_SETUP_KWARGS
+    _LOG_SETUP_DATE = today_str
+    _LOG_SETUP_KWARGS = dict(
+        log_prefix=log_prefix,
+        log_dir=log_dir,
+        console_level=console_level,
+        debug=debug,
+        extra_quiet_loggers=list(extra_quiet_loggers) if extra_quiet_loggers else None,
+    )
+
     logging.info(f"常规日志: {rel_log_file}")
     logging.info(f"调试日志: {rel_debug_log_file}")
     if invalid_litellm_level is not None:
@@ -195,3 +213,21 @@ def setup_logging(
             _DEFAULT_LITELLM_LOG_LEVEL,
             ", ".join(_ALLOWED_LOG_LEVELS),
         )
+
+
+def refresh_log_file_if_needed() -> bool:
+    """Re-initialize logging if the calendar date has changed since setup.
+
+    Designed for long-running scheduler processes (launchd) that span
+    multiple days.  Returns True if logging was refreshed.
+    """
+    global _LOG_SETUP_DATE, _LOG_SETUP_KWARGS
+    if not _LOG_SETUP_DATE or not _LOG_SETUP_KWARGS:
+        return False
+    today_str = datetime.now().strftime('%Y%m%d')
+    if today_str == _LOG_SETUP_DATE:
+        return False
+    kwargs = {k: v for k, v in _LOG_SETUP_KWARGS.items() if v is not None}
+    logging.info("检测到日期变更 (%s -> %s)，刷新日志文件", _LOG_SETUP_DATE, today_str)
+    setup_logging(**kwargs)
+    return True

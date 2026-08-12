@@ -318,8 +318,14 @@ def test_litellm_openai_prompt_cache_key_is_not_passed_through_without_verified_
     script = textwrap.dedent(
         """
         import json
+        import socket
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        # HTTPServer.server_bind 会对 127.0.0.1 做 getfqdn 反向 DNS，
+        # 部分机器该解析很慢（可达 30s+，导致子进程超时）。测试不关心
+        # server_name，直接短路以保持快速且与环境无关。
+        socket.getfqdn = lambda _host: "localhost"
 
         try:
             import litellm
@@ -392,7 +398,7 @@ def test_litellm_openai_prompt_cache_key_is_not_passed_through_without_verified_
         capture_output=True,
         env=sanitized_env,
         text=True,
-        timeout=15,
+        timeout=30,
     )
     if completed.returncode == 77:
         if "LOCAL_SOCKET_UNAVAILABLE" in completed.stdout + completed.stderr:

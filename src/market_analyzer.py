@@ -648,14 +648,16 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         
         return all_news
     
-    def generate_market_review(self, overview: MarketOverview, news: List) -> str:
+    def generate_market_review(self, overview: MarketOverview, news: List,
+                                 kronos_summary: Optional[Dict] = None) -> str:
         """
         使用大模型生成大盘复盘报告
-        
+
         Args:
             overview: 市场概览数据
             news: 市场新闻列表 (SearchResult 对象列表)
-            
+            kronos_summary: 可选的 Kronos 预测汇总
+
         Returns:
             大盘复盘报告文本
         """
@@ -685,7 +687,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             return self._generate_template_review(overview, news)
 
         # 构建 Prompt
-        prompt = self._build_review_prompt(overview, news)
+        prompt = self._build_review_prompt(overview, news, kronos_summary=kronos_summary)
 
         logger.info("[大盘] %s action=generate_review status=start", self._log_context())
         # Use the public generate_text() entry point - never access private analyzer attributes.
@@ -1035,7 +1037,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             score=score,
             temperature_label=temperature_label,
             reasons=reasons,
-            guidance=guidance_map[status],
+            guidance=self._apply_contra_warning(score, guidance_map[status]),
+            contra_warning=self._get_contra_warning(score),
             dimensions=scores["dimensions"],
             data_quality=str(scores["data_quality"]),
         )
@@ -1306,6 +1309,32 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "data_quality": data_quality,
         }
 
+    def _get_contra_warning(self, score: int) -> str:
+        """极端情绪下的逆向提醒，防止追涨杀跌。
+
+        基于回测观察：下行趋势中，极端高分（>=72）往往是阶段性高点，
+        极端低分（<=18）往往是恐慌低点。此处只做温和提醒，
+        不改变信号分本身，用户可自行权衡。
+        """
+        is_zh = self._get_review_language() != "en"
+        if score >= 72:
+            return ("情绪偏热，警惕获利盘兑现引发的震荡，不宜追高加仓。"
+                    if is_zh else
+                    "Sentiment is overheated; watch for profit-taking swings, avoid chasing. ")
+        if score <= 18:
+            return ("情绪偏冷，恐慌中常有技术性反弹，不宜盲目杀跌。"
+                    if is_zh else
+                    "Sentiment is oversold; panic often sees technical bounces, avoid blind selling.")
+        return ""
+
+    def _apply_contra_warning(self, score: int, base_guidance: str) -> str:
+        """在操作建议末尾追加逆向提醒（极端值时）。"""
+        warning = self._get_contra_warning(score)
+        if not warning:
+            return base_guidance
+        sep = " " if self._get_review_language() == "en" else "；"
+        return f"{base_guidance}{sep}{warning}"
+
     def _build_market_temperature(self, overview: MarketOverview) -> tuple[int, str]:
         scores = self._build_market_light_scores(overview)
         score = int(scores["score"])
@@ -1390,8 +1419,20 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         add_section("风险提示", "（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）")
         return "\n\n".join(sections)
 
-    def _build_review_prompt(self, overview: MarketOverview, news: List) -> str:
-        """构建复盘报告 Prompt"""
+    def _build_review_prompt(self, overview: MarketOverview, news: List,
+                                   kronos_summary: Optional[Dict] = None) -> str:
+        """构建复盘报告 Prompt
+
+        Args:
+            overview: 市场概览数据
+            news: 市场新闻列表
+            kronos_summary: 可选的 Kronos 预测汇总，包含:
+                - bullish_count: 看多数量
+                - bearish_count: 看空数量
+                - neutral_count: 震荡数量
+                - total: 总预测数
+                - details: [{code, name, direction, confidence, pct_change}, ...]
+        """
         review_language = self._get_review_language()
         # Korean reuses the English structural template but the model is told to
         # write the entire shell, headings, guidance and conclusion in Korean.
@@ -1510,6 +1551,36 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
             )
 
         output_template_sections = self._build_output_template_sections(review_language)
+
+        # 构建 Kronos 时序预测汇总区块
+        kronos_block = ""
+        if kronos_summary and kronos_summary.get("total", 0) > 0:
+            total = kronos_summary["total"]
+            bullish = kronos_summary.get("bullish_count", 0)
+            bearish = kronos_summary.get("bearish_count", 0)
+            neutral = kronos_summary.get("neutral_count", 0)
+            details = kronos_summary.get("details", [])
+            if review_language == "en":
+                kronos_block = f"""## Kronos Time-Series Prediction Summary
+- Bullish: {bullish}/{total} | Bearish: {bearish}/{total} | Neutral: {neutral}/{total}
+- Note: Kronos-small model, historical direction accuracy: bearish 91.1%, bullish 78.2%
+
+| Stock | Direction | Confidence | Predicted Change |
+|-------|-----------|------------|-----------------|"""
+                for d in details:
+                    kronos_block += f"\n| {d['name']} | {d['direction']} | {d['confidence']:.0f}% | {d['pct_change']:+.2f}% |"
+                kronos_block += "\n\n"
+            else:
+                kronos_block = f"""## Kronos 时序预测汇总
+- 看多: {bullish}/{total} | 看空: {bearish}/{total} | 震荡: {neutral}/{total}
+- 说明: Kronos-small 时序模型，历史方向准确率：看空 91.1%，看多 78.2%
+
+| 股票 | 方向 | 置信度 | 预测涨跌幅 |
+|------|------|--------|-----------|"""
+                for d in details:
+                    kronos_block += f"\n| {d['name']} | {d['direction']} | {d['confidence']:.0f}% | {d['pct_change']:+.2f}% |"
+                kronos_block += "\n"
+
         zh_market_scope_name = self._get_market_scope_name("zh")
         zh_report_title = f"{overview.date} 大盘复盘"
         if self.region in ("jp", "kr"):
@@ -1553,6 +1624,7 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 
 {data_no_indices_hint}
 
+{kronos_block}
 {self._get_strategy_prompt_block()}
 
 ---
@@ -1607,6 +1679,7 @@ Output the report content directly, no extra commentary.
 
 {data_no_indices_hint}
 
+{kronos_block}
 {self._get_strategy_prompt_block()}
 
 ---
@@ -1788,8 +1861,47 @@ Market conditions can change quickly. The data above is for reference only and d
         news = self.search_market_news()
         news = self._merge_persisted_market_intelligence(news)
 
-        # 3. 生成复盘报告
-        report = self.generate_market_review(overview, news)
+        # 3. 收集 Kronos 预测汇总
+        kronos_summary = None
+        try:
+            from src.services.kronos_service import KronosService
+            ks = KronosService()
+            if ks.is_available:
+                results = ks.predict_many(overview.date)
+                if results:
+                    details = []
+                    bullish = bearish = neutral = 0
+                    for code, pred in results.items():
+                        name = dict(KronosService.TRACKED_STOCKS).get(code, code)
+                        details.append({
+                            "code": code,
+                            "name": name,
+                            "direction": pred.direction,
+                            "confidence": pred.direction_confidence,
+                            "pct_change": pred.pred_pct_change,
+                        })
+                        if pred.direction == "看多":
+                            bullish += 1
+                        elif pred.direction == "看空":
+                            bearish += 1
+                        else:
+                            neutral += 1
+                    kronos_summary = {
+                        "bullish_count": bullish,
+                        "bearish_count": bearish,
+                        "neutral_count": neutral,
+                        "total": len(results),
+                        "details": details,
+                    }
+                    logger.info(
+                        "大盘复盘 Kronos 汇总: 看多=%d 看空=%d 震荡=%d 共%d只",
+                        bullish, bearish, neutral, len(results),
+                    )
+        except Exception as e:
+            logger.debug("大盘复盘 Kronos 汇总跳过: %s", e)
+
+        # 4. 生成复盘报告
+        report = self.generate_market_review(overview, news, kronos_summary=kronos_summary)
         snapshot = self.build_market_light_snapshot(overview) if self._supports_market_light() else None
         structured_payload = self.build_market_review_payload(
             overview,

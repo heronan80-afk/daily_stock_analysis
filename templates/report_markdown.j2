@@ -12,6 +12,20 @@
 {{ e.signal_emoji }} **{{ e.stock_name }}({{ e.result.code }})**: {{ e.localized_operation_advice }} | {{ labels.score_label }} {{ e.result.sentiment_score }} | {{ e.localized_trend_prediction }}
 {% endfor %}
 
+{% if enriched|length > 3 %}
+### 📋 {{ labels.comparison_table_label|default("横向对比") }}
+
+| {{ labels.name_label|default("股票") }} | {{ labels.score_label }} | {{ labels.action_label|default("动作") }} | {{ labels.trend_label|default("趋势") }} | {{ labels.support_label|default("支撑") }} | {{ labels.resistance_label|default("压力") }} | {{ labels.key_signal_label|default("关键信号") }} |
+|------|:----:|------|------|------:|------:|------|
+{% for e in enriched %}
+{% set _dp = (e.result.dashboard or {}).get('data_perspective') or {} %}
+{% set _pp = _dp.get('price_position') or {} %}
+{% set _sa = (e.result.dashboard or {}).get('signal_attribution') or {} %}
+{% set _key_signal = _sa.get('strongest_bullish_signal') if e.result.decision_type == 'buy' else (_sa.get('strongest_bearish_signal') if e.result.decision_type == 'sell' else (_sa.get('strongest_bullish_signal') or _sa.get('strongest_bearish_signal') or '-')) %}
+| {{ e.stock_name }} | {{ e.result.sentiment_score }} | {{ e.localized_operation_advice }} | {{ e.localized_trend_prediction }} | {{ _pp.get('support_level', '-') }} | {{ _pp.get('resistance_level', '-') }} | {{ _key_signal[:14] + '…' if _key_signal and _key_signal|length > 15 else (_key_signal or '-') }} |
+{% endfor %}
+{% endif %}
+
 ---
 {% if not summary_only %}
 {% for e in enriched %}

@@ -189,3 +189,62 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(quote.code, "000001")
         self.assertEqual(quote.name, "平安银行")
         tushare_module.get_realtime_quotes.assert_called_once_with("000001")
+
+    def test_get_trade_dates_falls_back_to_cache_on_rate_limit(self) -> None:
+        """When trade_cal is rate-limited, _get_trade_dates should return
+        the cached trade dates instead of propagating the exception."""
+        fetcher = self._make_fetcher()
+        # Seed the cache so it can be reused when trade_cal fails
+        fetcher.date_list = ["20260317", "20260314"]
+        fetcher._date_list_end = "20260317"
+        fetcher._api.trade_cal.side_effect = Exception(
+            "抱歉，您访问接口(trade_cal)频率超限(1次/分钟)"
+        )
+
+        with patch.object(fetcher, "_get_china_now", return_value=datetime(2026, 3, 18, 20, 0)):
+            result = fetcher._get_trade_dates("20260318")
+
+        # Should return cached dates, not raise
+        self.assertEqual(result, ["20260317", "20260314"])
+
+    def test_get_trade_dates_falls_back_to_weekday_on_rate_limit_no_cache(self) -> None:
+        """When trade_cal is rate-limited and no cache exists, _get_trade_dates
+        should fall back to weekday-based dates instead of raising."""
+        fetcher = self._make_fetcher()
+        fetcher._api.trade_cal.side_effect = Exception(
+            "抱歉，您访问接口(trade_cal)频率超限(1次/分钟)"
+        )
+
+        # 2026-03-20 is Friday
+        with patch.object(fetcher, "_get_china_now", return_value=datetime(2026, 3, 20, 20, 0)):
+            result = fetcher._get_trade_dates("20260320")
+
+        # Should not raise; should contain weekday dates (skip Sat/Sun)
+        self.assertIsInstance(result, list)
+        self.assertGreater(len(result), 0)
+        self.assertIn("20260320", result)  # Friday
+        self.assertNotIn("20260321", result)  # Saturday
+        self.assertNotIn("20260322", result)  # Sunday
+
+    def test_get_chip_distribution_survives_trade_cal_rate_limit(self) -> None:
+        """get_chip_distribution should not crash when trade_cal is rate-limited
+        but cached trade dates are available."""
+        fetcher = self._make_fetcher()
+        # Seed the cache
+        fetcher.date_list = ["20260317", "20260314"]
+        fetcher._date_list_end = "20260317"
+        # trade_cal fails, but cyq_chips and daily succeed
+        fetcher._api.trade_cal.side_effect = Exception(
+            "抱歉，您访问接口(trade_cal)频率超限(1次/分钟)"
+        )
+        fetcher._api.cyq_chips.return_value = pd.DataFrame(
+            {"price": [9.0, 10.0, 11.0], "percent": [20.0, 50.0, 30.0]}
+        )
+        fetcher._api.daily.return_value = pd.DataFrame({"close": [10.5]})
+
+        with patch.object(fetcher, "_get_china_now", return_value=datetime(2026, 3, 18, 20, 0)):
+            chip = fetcher.get_chip_distribution("600519")
+
+        self.assertIsNotNone(chip)
+        if chip is not None:
+            self.assertEqual(chip.date, "2026-03-17")

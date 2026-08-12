@@ -173,7 +173,11 @@ class YfinanceFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        retry=retry_if_exception_type((
+            OSError,  # covers requests.exceptions.*, curl_cffi.errors.*, built-in ConnectionError/TimeoutError
+            ConnectionError,
+            TimeoutError,
+        )),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:

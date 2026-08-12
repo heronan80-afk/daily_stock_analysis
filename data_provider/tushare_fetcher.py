@@ -279,25 +279,39 @@ class TushareFetcher(BaseFetcher):
             return self.date_list
 
         start_date = (china_now - timedelta(days=20)).strftime("%Y%m%d")
-        df_cal = self._call_api_with_rate_limit(
-            "trade_cal",
-            exchange="SSE",
-            start_date=start_date,
-            end_date=requested_end_date,
-        )
+        try:
+            df_cal = self._call_api_with_rate_limit(
+                "trade_cal",
+                exchange="SSE",
+                start_date=start_date,
+                end_date=requested_end_date,
+            )
 
-        if df_cal is None or df_cal.empty or "cal_date" not in df_cal.columns:
-            logger.warning("[Tushare] trade_cal 返回为空，无法更新交易日历缓存")
-            self.date_list = []
+            if df_cal is None or df_cal.empty or "cal_date" not in df_cal.columns:
+                logger.warning("[Tushare] trade_cal 返回为空，无法更新交易日历缓存")
+                self.date_list = []
+                self._date_list_end = requested_end_date
+                return self.date_list
+
+            trade_dates = sorted(
+                df_cal[df_cal["is_open"] == 1]["cal_date"].astype(str).tolist(),
+                reverse=True,
+            )
+            self.date_list = trade_dates
+            self._date_list_end = requested_end_date
+        except Exception as e:
+            # trade_cal 受 Tushare 服务端限频（免费用户 1 次/分钟），
+            # 限频时不要让整个筹码分布链路崩溃：
+            # 优先返回已有的缓存（即使跨日陈旧），其次用日历兜底。
+            logger.warning(f"[Tushare] trade_cal 调用失败，尝试降级: {e}")
+            if self.date_list is not None and len(self.date_list) > 0:
+                logger.info("[Tushare] 使用缓存的交易日历（可能陈旧）继续")
+                return self.date_list
+            # 没有缓存时，用自然日兜底（跳过周末）
+            fallback = self._fallback_trade_dates(china_now)
+            self.date_list = fallback
             self._date_list_end = requested_end_date
             return self.date_list
-
-        trade_dates = sorted(
-            df_cal[df_cal["is_open"] == 1]["cal_date"].astype(str).tolist(),
-            reverse=True,
-        )
-        self.date_list = trade_dates
-        self._date_list_end = requested_end_date
         return trade_dates
 
     @staticmethod
@@ -308,6 +322,17 @@ class TushareFetcher(BaseFetcher):
         if use_today or len(trade_dates) == 1:
             return trade_dates[0]
         return trade_dates[1]
+
+    @staticmethod
+    def _fallback_trade_dates(china_now: datetime) -> List[str]:
+        """当 trade_cal 限频且无缓存时，用自然日兜底（仅跳过周末，不含节假日）。"""
+        dates: List[str] = []
+        cur = china_now
+        for _ in range(10):
+            if cur.weekday() < 5:  # 0=Mon … 4=Fri
+                dates.append(cur.strftime("%Y%m%d"))
+            cur -= timedelta(days=1)
+        return dates
 
     @staticmethod
     def _detect_exchange_hint(stock_code: str) -> Optional[str]:
@@ -433,7 +458,12 @@ class TushareFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        retry=retry_if_exception_type((
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            ConnectionError,
+            TimeoutError,
+        )),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:

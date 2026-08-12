@@ -378,6 +378,14 @@ jobs:
           # 运行配置 ⬅️ 新增！
           # ==========================================
           REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+
+          # ==========================================
+          # AI Berkshire 深度研究（可选）
+          # ==========================================
+          AI_BERKSHIRE_ENABLED: ${{ vars.AI_BERKSHIRE_ENABLED || secrets.AI_BERKSHIRE_ENABLED || 'false' }}
+          AI_BERKSHIRE_SKILL: ${{ vars.AI_BERKSHIRE_SKILL || secrets.AI_BERKSHIRE_SKILL || 'investment-research' }}
+          AI_BERKSHIRE_REPO: ${{ vars.AI_BERKSHIRE_REPO || secrets.AI_BERKSHIRE_REPO || 'https://github.com/xbtlin/ai-berkshire.git' }}
+          AI_BERKSHIRE_SIGNAL_MIN: ${{ vars.AI_BERKSHIRE_SIGNAL_MIN || secrets.AI_BERKSHIRE_SIGNAL_MIN || '60' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
           REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
           SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
@@ -396,7 +404,13 @@ jobs:
           # 可选值: tencent, akshare_sina, efinance, akshare_em, tushare
           # 如果有 Tushare Pro 高积分账号，可将 tushare 放在首位
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
-          
+
+          # ==========================================
+          # Kronos 时序预测模型
+          # ==========================================
+          # 国内镜像（HuggingFace 模型下载加速）
+          HF_ENDPOINT: https://hf-mirror.com
+
         run: |
           # 解析自选股配置：
           # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
@@ -502,7 +516,46 @@ jobs:
           else
             python main.py $FORCE_RUN_ARG
           fi
-      
+
+      - name: 🔬 AI Berkshire 深度研究（信号驱动）
+        if: env.AI_BERKSHIRE_ENABLED == 'true' && (env.MODE == 'full' || env.MODE == 'stocks-only')
+        env:
+          AI_BERKSHIRE_PATH: ${{ github.workspace }}/ai-berkshire
+          CLAUDE_CLI_PATH: claude
+          BRIDGE_SIGNAL_MIN: ${{ env.AI_BERKSHIRE_SIGNAL_MIN || '60' }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          # Clone ai-berkshire repo
+          echo "📦 Cloning ai-berkshire..."
+          git clone --depth 1 "$AI_BERKSHIRE_REPO" "$AI_BERKSHIRE_PATH" 2>/dev/null || {
+            echo "⚠️ ai-berkshire clone failed, checking for cached copy..."
+            if [ -d "$AI_BERKSHIRE_PATH" ]; then
+              echo "✅ Using cached ai-berkshire"
+            else
+              echo "❌ ai-berkshire not available, skipping deep research"
+              exit 0
+            fi
+          }
+
+          # Install ai-berkshire Claude commands
+          if [ -f "$AI_BERKSHIRE_PATH/scripts/install-claude-commands.sh" ]; then
+            bash "$AI_BERKSHIRE_PATH/scripts/install-claude-commands.sh"
+          fi
+
+          # Install dependencies for bridge script
+          pip install python-dotenv 2>/dev/null || true
+
+          # Run bridge — detect signals and invoke deep research
+          echo "🔬 Running ai-berkshire deep research bridge..."
+          python scripts/ai_berkshire_bridge.py \
+            --results reports/ \
+            --min-score "$BRIDGE_SIGNAL_MIN" \
+            --skill "$AI_BERKSHIRE_SKILL" \
+            --ai-berkshire-path "$AI_BERKSHIRE_PATH" \
+            2>&1 || echo "⚠️ ai-berkshire bridge completed with warnings"
+
+          echo "✅ Deep research step complete"
+
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()

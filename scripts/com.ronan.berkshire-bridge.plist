@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ronan.berkshire-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ronan/projects/daily_stock_analysis/venv/bin/python</string>
+        <string>scripts/ai_berkshire_bridge.py</string>
+        <string>--results</string>
+        <string>reports/</string>
+        <string>--min-score</string>
+        <string>60</string>
+        <string>--skill</string>
+        <string>investment-research</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ronan/projects/daily_stock_analysis</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AI_BERKSHIRE_PATH</key>
+        <string>/Users/ronan/projects/ai-berkshire</string>
+        <key>AI_BERKSHIRE_SKILL</key>
+        <string>investment-research</string>
+        <key>BRIDGE_SIGNAL_MIN</key>
+        <string>60</string>
+    </dict>
+
+    <!-- StartCalendarInterval: 每天 18:30 周一到周五 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+            <key>Weekday</key>
+            <integer>1</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+            <key>Weekday</key>
+            <integer>2</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+            <key>Weekday</key>
+            <integer>3</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+            <key>Weekday</key>
+            <integer>4</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+            <key>Weekday</key>
+            <integer>5</integer>
+        </dict>
+    </array>
+
+    <!-- 不随 launchd load 立即运行 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/berkshire_bridge_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/berkshire_bridge_stderr.log</string>
+</dict>
+</plist>

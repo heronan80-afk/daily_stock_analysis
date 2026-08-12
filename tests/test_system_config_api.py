@@ -63,6 +63,15 @@ class SystemConfigApiTestCase(unittest.TestCase):
         self._orig_database_path = os.environ.get("DATABASE_PATH")
         os.environ["ENV_FILE"] = str(self.env_path)
         os.environ["DATABASE_PATH"] = str(Path(self.temp_dir.name) / "system_config_api_test.db")
+        # 前序测试导入可能触发 setup_env 把真实 .env 加载进 os.environ（override=False
+        # 不清已有键），动态清除真实 .env 的所有键，保证配置校验与测试顺序无关。
+        # 本类测试完全以临时 ENV_FILE 为准，清除这些键是安全的。
+        _real_env_path = Path(__file__).resolve().parent.parent / ".env"
+        if _real_env_path.exists():
+            from dotenv import dotenv_values
+
+            for _leaked_key in dotenv_values(_real_env_path):
+                os.environ.pop(_leaked_key, None)
         Config.reset_instance()
 
         self.manager = ConfigManager(env_path=self.env_path)

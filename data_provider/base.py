@@ -14,9 +14,12 @@
 3. 指数退避重试机制
 """
 
+import json
 import logging
+import os
 import random
 import time
+from pathlib import Path
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -30,7 +33,7 @@ from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
-from .realtime_types import CircuitBreaker
+from .realtime_types import CircuitBreaker, ChipDistribution
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -232,6 +235,89 @@ def _is_meaningful_chip_distribution(chip: Any) -> bool:
         and (
             (concentration_90 is not None and concentration_90 >= 0)
             or (concentration_70 is not None and concentration_70 >= 0)
+        )
+    )
+
+
+# === 筹码分布 last-known-good 磁盘缓存 ===
+# 东财 stock_cyq_em 近期约 1/3 请求被断连（RemoteDisconnected），若每次失败都直接
+# 报"筹码健康：数据缺失"，报告观感很差。筹码分布逐日变化慢，全源失败时回退到最近
+# 一次成功值（≤7 天）作为近似，渲染层会标注实际数据日期（见 notification.py）。
+_CHIP_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "data" / "cache" / "chip"
+_CHIP_CACHE_MAX_AGE_SECONDS: float = 7 * 24 * 3600  # 7 天内的缓存视为新鲜
+_CHIP_RETRY_COOLDOWN_SECONDS: float = 10.0  # 全源失败且无可用缓存时的补漏重试冷却
+
+
+def _chip_cache_path(stock_code: str) -> Path:
+    return _CHIP_CACHE_DIR / f"{stock_code}.json"
+
+
+def _chip_to_cache_dict(chip: Any) -> Dict[str, Any]:
+    """序列化 ChipDistribution 供磁盘缓存使用。"""
+    d = chip.to_dict() if hasattr(chip, "to_dict") else dict(chip.__dict__)
+    d = dict(d)
+    # to_dict 未覆盖的部分字段补齐，保证 round-trip 无损
+    for key in ("cost_70_low", "cost_70_high"):
+        d.setdefault(key, getattr(chip, key, 0.0))
+    d["saved_at"] = time.time()
+    return d
+
+
+def _save_chip_cache(stock_code: str, chip: Any) -> None:
+    """原子写入筹码缓存（tmp + rename，避免读到半写文件）。"""
+    try:
+        _CHIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _chip_cache_path(stock_code)
+        tmp_path = path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_chip_to_cache_dict(chip), f, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception as e:  # 缓存失败不阻塞主流程
+        logger.warning(f"[筹码缓存] 写入失败 {stock_code}: {e}")
+
+
+def _load_chip_cache(stock_code: str) -> Optional[ChipDistribution]:
+    """读取 ≤7 天内的最近一次成功筹码数据；无缓存/过期/损坏返回 None。"""
+    try:
+        path = _chip_cache_path(stock_code)
+        if not path.exists():
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        saved_at = float(d.get("saved_at") or 0)
+        age_seconds = time.time() - saved_at
+        if age_seconds > _CHIP_CACHE_MAX_AGE_SECONDS:
+            logger.debug(f"[筹码缓存] {stock_code} 缓存已过期（{age_seconds:.0f}s 前）")
+            return None
+        return ChipDistribution(
+            code=stock_code,
+            date=str(d.get("date") or ""),
+            source=f"cache:{d.get('source') or 'unknown'}",
+            profit_ratio=float(d.get("profit_ratio") or 0),
+            avg_cost=float(d.get("avg_cost") or 0),
+            cost_90_low=float(d.get("cost_90_low") or 0),
+            cost_90_high=float(d.get("cost_90_high") or 0),
+            concentration_90=float(d.get("concentration_90") or 0),
+            cost_70_low=float(d.get("cost_70_low") or 0),
+            cost_70_high=float(d.get("cost_70_high") or 0),
+            concentration_70=float(d.get("concentration_70") or 0),
+        )
+    except Exception as e:
+        logger.warning(f"[筹码缓存] 读取失败 {stock_code}: {e}")
+        return None
+
+
+def _is_chip_connection_error(error_type: str, error_reason: str) -> bool:
+    """判断数据源异常是否为可重试的连接类错误（东财断连/超时）。"""
+    haystack = f"{error_type} {error_reason}".lower()
+    return any(
+        token in haystack
+        for token in (
+            "connectionerror",
+            "remotedisconnected",
+            "connection aborted",
+            "remote end closed",
+            "timeout",
         )
     )
 
@@ -2145,87 +2231,128 @@ class DataFetcherManager:
 
         circuit_breaker = get_chip_circuit_breaker()
 
-        candidate_fetchers = []
-        # 直接遍历管理器已经按 priority 排好序的数据源列表
-        for fetcher in self._get_fetchers_snapshot():
-            # 只处理实现了筹码分布逻辑的数据源
-            if not hasattr(fetcher, 'get_chip_distribution'):
-                continue
+        # 直接遍历管理器已经按 priority 排好序的数据源列表（熔断状态下跳过）
+        def _build_candidates() -> List[Tuple[Any, str, str]]:
+            candidates = []
+            for fetcher in self._get_fetchers_snapshot():
+                # 只处理实现了筹码分布逻辑的数据源
+                if not hasattr(fetcher, 'get_chip_distribution'):
+                    continue
+                fetcher_name = fetcher.name
+                # 动态生成熔断器的 key，例如 "TushareFetcher" -> "tushare_chip"
+                source_key = f"{fetcher_name.replace('Fetcher', '').lower()}_chip"
+                # 检查熔断器状态
+                if not circuit_breaker.is_available(source_key):
+                    logger.debug(f"[熔断] {fetcher_name} 筹码接口处于熔断状态，尝试下一个")
+                    continue
+                candidates.append((fetcher, fetcher_name, source_key))
+            return candidates
 
-            fetcher_name = fetcher.name
-            # 动态生成熔断器的 key，例如 "TushareFetcher" -> "tushare_chip"
-            source_key = f"{fetcher_name.replace('Fetcher', '').lower()}_chip"
-
-            # 检查熔断器状态
-            if not circuit_breaker.is_available(source_key):
-                logger.debug(f"[熔断] {fetcher_name} 筹码接口处于熔断状态，尝试下一个")
-                continue
-
-            candidate_fetchers.append((fetcher, fetcher_name, source_key))
-
-        for index, (fetcher, fetcher_name, source_key) in enumerate(candidate_fetchers):
-            fallback_to = (
-                candidate_fetchers[index + 1][1]
-                if index + 1 < len(candidate_fetchers)
-                else None
-            )
-            attempt_start = time.time()
-            try:
-                record_provider_run_started(
-                    data_type="chip",
-                    provider=fetcher_name,
-                    operation="get_chip_distribution",
+        # 全源失败后的处理顺序：
+        # 1. 有 ≤7 天的 last-known-good 缓存 → 直接用缓存（不烧补漏重试的时间）
+        # 2. 无缓存 → 冷却后补漏重试一轮（只重试首轮"连接类失败"的数据源，
+        #    东财断连多为短时抖动；空结果/无权限等确定性失败不重复请求）
+        # 3. 仍失败 → 报缺失
+        retry_sources: Optional[set] = None
+        for attempt in (1, 2):
+            if retry_sources is not None and not retry_sources:
+                break
+            candidate_fetchers = _build_candidates()
+            for index, (fetcher, fetcher_name, source_key) in enumerate(candidate_fetchers):
+                # 第二轮只重试首轮连接类失败的数据源；第一轮不做过滤
+                if attempt == 2 and retry_sources is not None and fetcher_name not in retry_sources:
+                    continue
+                fallback_to = (
+                    candidate_fetchers[index + 1][1]
+                    if index + 1 < len(candidate_fetchers)
+                    else None
                 )
-                chip = self._call_fetcher_method(fetcher, 'get_chip_distribution', stock_code)
-                latency_ms = int((time.time() - attempt_start) * 1000)
-                if _is_meaningful_chip_distribution(chip):
-                    record_provider_run(
+                attempt_start = time.time()
+                try:
+                    record_provider_run_started(
                         data_type="chip",
                         provider=fetcher_name,
                         operation="get_chip_distribution",
-                        success=True,
-                        latency_ms=latency_ms,
-                        record_count=1,
                     )
-                    circuit_breaker.record_success(source_key)
-                    logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
-                    return chip
-                else:
+                    chip = self._call_fetcher_method(fetcher, 'get_chip_distribution', stock_code)
+                    latency_ms = int((time.time() - attempt_start) * 1000)
+                    if _is_meaningful_chip_distribution(chip):
+                        record_provider_run(
+                            data_type="chip",
+                            provider=fetcher_name,
+                            operation="get_chip_distribution",
+                            success=True,
+                            latency_ms=latency_ms,
+                            record_count=1,
+                        )
+                        circuit_breaker.record_success(source_key)
+                        logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
+                        _save_chip_cache(stock_code, chip)
+                        return chip
+                    else:
+                        record_provider_run(
+                            data_type="chip",
+                            provider=fetcher_name,
+                            operation="get_chip_distribution",
+                            success=False,
+                            latency_ms=latency_ms,
+                            error_type="empty",
+                            error_message="empty or incomplete chip distribution",
+                            fallback_to=fallback_to,
+                            record_count=0,
+                        )
+                        if chip is not None:
+                            logger.warning(
+                                "[筹码分布] %s 返回字段不完整或占位值，继续尝试下一个数据源",
+                                fetcher_name,
+                            )
+                        # 空结果或占位结果：释放 HALF_OPEN 探测名额，避免卡死
+                        circuit_breaker.record_inconclusive(source_key)
+                except Exception as e:
+                    error_type, error_reason = summarize_exception(e)
                     record_provider_run(
                         data_type="chip",
                         provider=fetcher_name,
                         operation="get_chip_distribution",
                         success=False,
-                        latency_ms=latency_ms,
-                        error_type="empty",
-                        error_message="empty or incomplete chip distribution",
+                        latency_ms=int((time.time() - attempt_start) * 1000),
+                        error_type=error_type,
+                        error_message=error_reason,
                         fallback_to=fallback_to,
-                        record_count=0,
                     )
-                    if chip is not None:
-                        logger.warning(
-                            "[筹码分布] %s 返回字段不完整或占位值，继续尝试下一个数据源",
-                            fetcher_name,
-                        )
-                    # 空结果或占位结果：释放 HALF_OPEN 探测名额，避免卡死
-                    circuit_breaker.record_inconclusive(source_key)
-            except Exception as e:
-                error_type, error_reason = summarize_exception(e)
-                record_provider_run(
-                    data_type="chip",
-                    provider=fetcher_name,
-                    operation="get_chip_distribution",
-                    success=False,
-                    latency_ms=int((time.time() - attempt_start) * 1000),
-                    error_type=error_type,
-                    error_message=error_reason,
-                    fallback_to=fallback_to,
-                )
-                logger.warning(f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {e}")
-                circuit_breaker.record_failure(source_key, str(e))
-                continue
+                    logger.warning(f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {e}")
+                    circuit_breaker.record_failure(source_key, str(e))
+                    if retry_sources is None:
+                        retry_sources = set()
+                    if _is_chip_connection_error(error_type, error_reason):
+                        retry_sources.add(fetcher_name)
+                    continue
 
-        logger.warning(f"[筹码分布] {stock_code} 所有数据源均失败")
+            if attempt == 1:
+                # 有可用缓存则直接回退，避免为"再新鲜一天"多烧一轮重试
+                cached_chip = _load_chip_cache(stock_code)
+                if cached_chip is not None:
+                    logger.warning(
+                        f"[筹码分布] {stock_code} 数据源失败，使用缓存筹码（来源={cached_chip.source}, 日期={cached_chip.date}）"
+                    )
+                    return cached_chip
+                if not retry_sources:
+                    break
+                logger.warning(
+                    f"[筹码分布] {stock_code} 首轮失败且无缓存，冷却 {_CHIP_RETRY_COOLDOWN_SECONDS:.0f}s 后补漏重试: "
+                    f"{sorted(retry_sources)}"
+                )
+                time.sleep(_CHIP_RETRY_COOLDOWN_SECONDS)
+
+        # 全源仍失败：最后再尝试一次缓存（第二轮可能写入了新缓存）
+        cached_chip = _load_chip_cache(stock_code)
+        if cached_chip is not None:
+            logger.warning(
+                f"[筹码分布] {stock_code} 数据源失败，使用缓存筹码（来源={cached_chip.source}, 日期={cached_chip.date}）"
+            )
+            return cached_chip
+
+        logger.warning(f"[筹码分布] {stock_code} 所有数据源均失败且无可用缓存")
         return None
 
     def get_stock_name(self, stock_code: str, allow_realtime: bool = True) -> Optional[str]:

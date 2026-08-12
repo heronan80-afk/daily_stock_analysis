@@ -2274,6 +2274,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
                 {
                     "GEMINI_API_KEY": "outer-key",
                     "SNAPSHOT_SOURCE_PRIORITY": "",
+                    # 配置未启用 tushare 时，显式清空环境 token，避免本机真实 .env 泄漏
+                    # 导致 snapshot 优先级误判为含 tushare
+                    "TUSHARE_TOKEN": "",
                     "LLM_CANDIDATE_CONTEXT_ENABLED": "true",
                     "LLM_CANDIDATE_MULTIPLIER": "",
                     "LLM_MAX_CANDIDATES": "",

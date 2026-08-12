@@ -1,0 +1,79 @@
+{
+  "report_date": "2026-07-10",
+  "lookback": 400,
+  "pred_len": 15,
+  "model": "Kronos-small",
+  "device": "cpu",
+  "results": {
+    "300502": {
+      "name": "新易盛",
+      "last_price": 523.05,
+      "mape": 53.51,
+      "direction_accuracy": 85.7,
+      "actual_total_return_pct": -22.73,
+      "pred_total_return_pct": -25.13,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "603019": {
+      "name": "中科曙光",
+      "last_price": 107.5,
+      "mape": 10.64,
+      "direction_accuracy": 57.1,
+      "actual_total_return_pct": -21.36,
+      "pred_total_return_pct": -13.76,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "300308": {
+      "name": "中际旭创",
+      "last_price": 1093.98,
+      "mape": 49.34,
+      "direction_accuracy": 50.0,
+      "actual_total_return_pct": -18.59,
+      "pred_total_return_pct": -50.09,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "600183": {
+      "name": "生益科技",
+      "last_price": 149.39,
+      "mape": 26.13,
+      "direction_accuracy": 57.1,
+      "actual_total_return_pct": -21.43,
+      "pred_total_return_pct": -37.3,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "300418": {
+      "name": "昆仑万维",
+      "last_price": 49.42,
+      "mape": 27.79,
+      "direction_accuracy": 64.3,
+      "actual_total_return_pct": -10.37,
+      "pred_total_return_pct": -2.84,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "002463": {
+      "name": "沪电股份",
+      "last_price": 129.44,
+      "mape": 20.86,
+      "direction_accuracy": 50.0,
+      "actual_total_return_pct": -16.77,
+      "pred_total_return_pct": -30.02,
+      "total_direction_correct": true,
+      "pred_days": 15
+    },
+    "300031": {
+      "name": "宝通科技",
+      "last_price": 22.7,
+      "mape": 29.81,
+      "direction_accuracy": 64.3,
+      "actual_total_return_pct": -6.17,
+      "pred_total_return_pct": 8.66,
+      "total_direction_correct": false,
+      "pred_days": 15
+    }
+  }
+}

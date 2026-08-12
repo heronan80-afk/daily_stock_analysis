@@ -14,6 +14,11 @@
 """
 
 import logging
+
+try:
+    from src.logging_config import refresh_log_file_if_needed as _refresh_log_file_if_needed
+except Exception:
+    _refresh_log_file_if_needed = None
 import re
 import signal
 import threading
@@ -278,10 +283,59 @@ class Scheduler:
         """Public wrapper for runtime scheduler reconciliation."""
         self._refresh_daily_schedule_if_needed()
 
+    def _cleanup_connections(self) -> None:
+        """释放分析任务遗留的 HTTP 连接，避免文件描述符泄漏积累。
+
+        每次定时任务执行后调用，关闭所有 urllib3 / requests 连接池，
+        防止 CLOSE_WAIT 连接持续累积导致 [Errno 24] Too many open files。
+        """
+        try:
+            import gc
+            # 1. 关闭所有 urllib3 连接池
+            for obj in gc.get_objects():
+                module_name = getattr(type(obj), "__module__", "")
+                if "urllib3" in module_name and hasattr(obj, "close"):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            # 2. 关闭 requests 适配器
+            import requests.adapters
+            for obj in gc.get_objects():
+                if isinstance(obj, requests.adapters.HTTPAdapter):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            # 3. 关闭 aiohttp ClientSession
+            import aiohttp
+            for obj in gc.get_objects():
+                if isinstance(obj, aiohttp.ClientSession):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _safe_run_task(self):
         """安全执行任务（带异常捕获）"""
         if self._task_callback is None:
             return
+
+        if _refresh_log_file_if_needed is not None:
+            try:
+                _refresh_log_file_if_needed()
+            except Exception:
+                pass
 
         try:
             logger.info("=" * 50)
@@ -294,6 +348,9 @@ class Scheduler:
 
         except Exception as e:
             logger.exception(f"定时任务执行失败: {e}")
+        finally:
+            # 每次任务执行后清理 HTTP 连接，避免文件描述符泄漏
+            self._cleanup_connections()
 
     def add_background_task(
         self,

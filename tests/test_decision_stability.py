@@ -340,3 +340,101 @@ def test_refines_hold_pullback_near_support_as_shakeout_watch() -> None:
     assert result.decision_type == "hold"
     assert result.operation_advice == "洗盘观察"
     assert "更适合按洗盘观察处理" in result.risk_warning
+
+def test_buy_downgrade_neutralizes_trend_when_capital_flow_unavailable() -> None:
+    """当买入因资金流缺失被降级时，趋势方向应同步置为震荡，而非维持看多。"""
+    result = _result(
+        decision_type="buy",
+        operation_advice="买入",
+        score=66,
+        current_price=32.0,
+    )
+    assert result.trend_prediction == "看多"
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _unsupported_fund_flow(),
+    )
+
+    assert result.decision_type == "hold"
+    assert result.trend_prediction == "震荡"
+
+
+def test_buy_downgrade_score_capped_at_50_when_capital_flow_unavailable() -> None:
+    """资金流缺失时，买入降级后的评分上限应为 50（中性），而非 59（观望带顶部）。"""
+    result = _result(
+        decision_type="buy",
+        operation_advice="买入",
+        score=68,
+        current_price=32.0,
+    )
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _unsupported_fund_flow(),
+    )
+
+    assert result.decision_type == "hold"
+    assert result.sentiment_score <= 50
+    assert result.sentiment_score >= 45
+    calibration = result.dashboard.get("decision_score_calibration", {})
+    assert calibration.get("raw_score") == 68
+    assert calibration.get("adjusted_score") <= 50
+def test_hold_signal_gets_bullish_lean_when_score_above_midpoint() -> None:
+    """观望带高分段（>52）的信号应显示「震荡偏多」。"""
+    result = _result(
+        decision_type="hold",
+        operation_advice="持有",
+        score=55,
+        current_price=32.0,
+    )
+    result.trend_prediction = "震荡"
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _fund_flow(main=0, five_day=0, ten_day=0),
+    )
+
+    assert "偏多" in result.trend_prediction
+
+
+def test_hold_signal_gets_bearish_lean_when_score_below_midpoint() -> None:
+    """观望带低分段（<48）的信号应显示「震荡偏空」。"""
+    result = _result(
+        decision_type="hold",
+        operation_advice="持有",
+        score=46,
+        current_price=32.0,
+    )
+    result.trend_prediction = "震荡"
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _fund_flow(main=0, five_day=0, ten_day=0),
+    )
+
+    assert "偏空" in result.trend_prediction
+
+
+def test_hold_signal_stays_neutral_near_midpoint() -> None:
+    """评分接近观望带中点（48-52）时，不加偏多/偏空后缀。"""
+    result = _result(
+        decision_type="hold",
+        operation_advice="持有",
+        score=50,
+        current_price=32.0,
+    )
+    result.trend_prediction = "震荡"
+
+    stabilize_decision_with_structure(
+        result,
+        SimpleNamespace(support_levels=[30.0], resistance_levels=[34.0]),
+        _fund_flow(main=0, five_day=0, ten_day=0),
+    )
+
+    assert result.trend_prediction == "震荡"
+

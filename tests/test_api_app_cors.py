@@ -28,15 +28,18 @@ class AppCorsConfigTestCase(unittest.TestCase):
         self.assertEqual(cors.kwargs["allow_origins"], ["*"])
         self.assertFalse(cors.kwargs["allow_credentials"])
 
-    def test_allow_all_warns_when_auth_is_disabled(self):
+    def test_allow_all_rejected_when_auth_disabled_non_desktop(self):
+        # 安全限制：非桌面 + 认证关闭时开放跨域被拒绝并回退，不再只发警告
         with patch.dict(os.environ, {"CORS_ALLOW_ALL": "true"}, clear=False), \
              patch("api.app.is_auth_enabled", return_value=False), \
-             patch("api.app.logger.warning") as warning:
-            self._build_app()
+             patch("api.app.logger.error") as error:
+            app = self._build_app()
 
-        warning.assert_called_once()
-        self.assertIn("CORS_ALLOW_ALL=true", warning.call_args.args[0])
-        self.assertIn("ADMIN_AUTH_ENABLED is false", warning.call_args.args[0])
+        error.assert_called_once()
+        self.assertIn("CORS_ALLOW_ALL=true 已被拒绝", error.call_args.args[0])
+        cors = next(m for m in app.user_middleware if m.cls is CORSMiddleware)
+        self.assertNotEqual(cors.kwargs["allow_origins"], ["*"])
+        self.assertTrue(cors.kwargs["allow_credentials"])
 
     def test_allow_all_does_not_warn_when_auth_is_enabled(self):
         with patch.dict(os.environ, {"CORS_ALLOW_ALL": "true"}, clear=False), \

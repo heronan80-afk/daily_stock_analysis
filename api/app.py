@@ -344,7 +344,17 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
         allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
     
     # 允许所有来源（开发/演示用）
+    # 安全限制：非桌面模式且认证未启用时，禁止 CORS_ALLOW_ALL，
+    # 防止公网部署下任意网站跨域调用未受保护的 API。
     allow_all_origins = os.environ.get("CORS_ALLOW_ALL", "").lower() == "true"
+    is_desktop = os.environ.get("DSA_DESKTOP_MODE", "").lower() == "true"
+    if allow_all_origins and not is_desktop and not is_auth_enabled():
+        logger.error(
+            "CORS_ALLOW_ALL=true 已被拒绝：非桌面模式下认证未启用，"
+            "不允许开放跨域访问。请设置 ADMIN_AUTH_ENABLED=true 或 "
+            "显式配置 CORS_ORIGINS 白名单。CORS 将回退为默认本地来源。"
+        )
+        allow_all_origins = False
     allow_credentials = not allow_all_origins
     if allow_all_origins:
         _warn_if_open_cors_without_auth()

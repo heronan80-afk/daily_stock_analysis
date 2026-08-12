@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ronan.dsa-log-cleanup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ronan/projects/daily_stock_analysis/venv/bin/python</string>
+        <string>scripts/cleanup_logs.py</string>
+        <string>--execute</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ronan/projects/daily_stock_analysis</string>
+
+    <!-- 每天 03:17 自动清理 7 天前日志 + 30 天前报告（避开 14:00/15:05/18:00/18:30 其他任务） -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/cleanup_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/cleanup_stderr.log</string>
+</dict>
+</plist>

@@ -443,7 +443,12 @@ class AkshareFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),  # 最多重试3次
         wait=wait_exponential(multiplier=1, min=2, max=30),  # 指数退避：2, 4, 8... 最大30秒
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        retry=retry_if_exception_type((
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            ConnectionError,  # built-in, for non-requests callers
+            TimeoutError,
+        )),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1572,6 +1577,26 @@ class AkshareFetcher(BaseFetcher):
             circuit_breaker.record_failure(sina_key, str(e))
             return None
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            ConnectionError,  # built-in, for non-requests callers
+            TimeoutError,
+        )),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+    )
+    def _fetch_chip_cyq(self, stock_code: str) -> pd.DataFrame:
+        """带重试的 ak.stock_cyq_em 调用，仅对网络异常重试。"""
+        import akshare as ak
+        # 确保 eastmoney_patch 已激活（仅影响 eastmoney 域名，
+        # 为裸 requests.get 注入 User-Agent 和 NID cookie，降低被断连概率）
+        eastmoney_patch()
+        self._enforce_rate_limit()
+        return ak.stock_cyq_em(symbol=stock_code)
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据
@@ -1587,8 +1612,6 @@ class AkshareFetcher(BaseFetcher):
         Returns:
             ChipDistribution 对象（最新一天的数据），获取失败返回 None
         """
-        import akshare as ak
-
         # 美股没有筹码分布数据（Akshare 不支持）
         if _is_us_code(stock_code):
             logger.debug(f"[API跳过] {stock_code} 是美股，无筹码分布数据")
@@ -1605,15 +1628,11 @@ class AkshareFetcher(BaseFetcher):
             return None
         
         try:
-            # 防封禁策略
-            self._set_random_user_agent()
-            self._enforce_rate_limit()
-            
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
             import time as _time
             api_start = _time.time()
             
-            df = ak.stock_cyq_em(symbol=stock_code)
+            df = self._fetch_chip_cyq(stock_code)
             
             api_elapsed = _time.time() - api_start
             

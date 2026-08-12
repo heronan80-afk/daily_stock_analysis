@@ -876,16 +876,16 @@ print('{"bad": "stderr"}', file=sys.stderr)
     assert "stderr" in result.diagnostics["stderr_preview"]
 
 
-def test_multiple_json_objects_fail_as_invalid_json_ambiguous(tmp_path: Path) -> None:
+def test_multiple_json_objects_recovers_largest_json(tmp_path: Path) -> None:
+    """Multiple bare JSON objects now recover the largest one (GLM-5.2 style wrapping)."""
     analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
     analyzer._config_override = _config()
     backend = _backend(tmp_path, "print('{\"sentiment_score\": 70} {\"sentiment_score\": 80}')")
 
-    with pytest.raises(GenerationError) as exc_info:
-        backend.generate("prompt", {}, response_validator=analyzer._validate_json_response)
+    # 验证器应成功（不再因歧义抛 GenerationError）；result.text 保持原始输出不变
+    result = backend.generate("prompt", {}, response_validator=analyzer._validate_json_response)
 
-    assert exc_info.value.error_code is GenerationErrorCode.INVALID_JSON
-    assert exc_info.value.details["reason"] == "ambiguous_json"
+    assert result.text.startswith('{"sentiment_score": 70}')
 
 
 def test_command_not_executable(monkeypatch, tmp_path: Path) -> None:

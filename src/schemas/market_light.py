@@ -40,5 +40,6 @@ class MarketLightSnapshot(BaseModel):
     temperature_label: str
     reasons: list[str]
     guidance: str
+    contra_warning: str = ""
     dimensions: MarketLightDimensions
     data_quality: MarketLightDataQuality

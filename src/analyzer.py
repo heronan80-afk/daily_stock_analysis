@@ -491,7 +491,7 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
 
 # ---------- chip_structure fallback (Issue #589) ----------
 
-_CHIP_KEYS: tuple = ("profit_ratio", "avg_cost", "concentration", "chip_health")
+_CHIP_KEYS: tuple = ("profit_ratio", "avg_cost", "concentration", "chip_health", "data_date")
 
 
 def _is_value_placeholder(v: Any) -> bool:
@@ -846,17 +846,20 @@ def _build_chip_structure_from_data(chip_data: Any, language: str = "zh") -> Dic
         pr = _safe_float(chip_data.profit_ratio)
         ac = chip_data.avg_cost
         c90 = _safe_float(chip_data.concentration_90)
+        data_date = getattr(chip_data, "date", None) or None
     else:
         d = chip_data if isinstance(chip_data, dict) else {}
         pr = _safe_float(d.get("profit_ratio"))
         ac = d.get("avg_cost")
         c90 = _safe_float(d.get("concentration_90"))
+        data_date = d.get("date") or None
     chip_health = _derive_chip_health(pr, c90, language=language)
     return {
         "profit_ratio": f"{pr:.1%}",
         "avg_cost": ac if (ac is not None and _safe_float(ac) != 0.0) else "N/A",
         "concentration": f"{c90:.2%}",
         "chip_health": chip_health,
+        "data_date": data_date or "",
     }
 
 
@@ -1162,6 +1165,8 @@ def stabilize_decision_with_structure(
                     resistance=resistance,
                     flow_bias=flow_bias,
                 )
+        if result.decision_type == "hold":
+            _apply_hold_trend_lean(result, result.sentiment_score)
         _sync_stability_dashboard_fields(result)
     except Exception as exc:
         logger.warning("[decision_stability] skipped: %s", exc)
@@ -1365,18 +1370,56 @@ def _record_decision_score_calibration(
     dashboard["decision_score_calibration"] = calibration
 
 
+
+def _apply_hold_trend_lean(result: "AnalysisResult", adjusted_score: int) -> None:
+    """给观望/震荡类信号加偏多/偏空后缀，基于评分相对观望带中点的位置。
+
+    - score > 52: 偏多（如 震荡偏多）
+    - score < 48: 偏空（如 震荡偏空）
+    - 48-52: 纯震荡（不加后缀，中性）
+
+    只有在趋势方向本身是中性（震荡/Sideways/횡보）时才追加，
+    避免覆盖明确的看多/看空结论。
+    """
+    trend = str(getattr(result, "trend_prediction", "") or "")
+    lean = ""
+    if adjusted_score > 52:
+        lean = "偏多"
+    elif adjusted_score < 48:
+        lean = "偏空"
+    if not lean:
+        return
+
+    # Only append to neutral trend labels (not to 看多/看空)
+    neutral_patterns = {"zh": "震荡", "en": "Sideways", "ko": "횡보"}
+    for lang, base in neutral_patterns.items():
+        if trend == base:
+            suffix_map = {
+                "zh": {"偏多": "偏多", "偏空": "偏空"},
+                "en": {"偏多": " (bullish lean)", "偏空": " (bearish lean)"},
+                "ko": {"偏多": " (상승 기대)", "偏空": " (하락 우려)"},
+            }
+            suffix = suffix_map.get(lang, {}).get(lean, "")
+            if suffix:
+                result.trend_prediction = base + suffix
+            return
 def _bound_hold_watch_sentiment_score(
     result: "AnalysisResult",
     *,
     reason: Optional[str] = None,
     final_action: str = "watch",
+    upper_bound: int = 59,
+    lower_bound: int = 45,
+    add_trend_lean: bool = False,
 ) -> None:
     try:
         score = int(getattr(result, "sentiment_score", 50))
     except (TypeError, ValueError):
         score = 50
-    adjusted_score = min(59, max(45, score))
+    adjusted_score = min(upper_bound, max(lower_bound, score))
     result.sentiment_score = adjusted_score
+    if add_trend_lean:
+        _apply_hold_trend_lean(result, adjusted_score)
     _record_decision_score_calibration(
         result,
         raw_score=score,
@@ -1466,7 +1509,13 @@ def _downgrade_buy_without_capital_flow(
 
     result.decision_type = "hold"
     result.confidence_level = confidence
-    _bound_hold_watch_sentiment_score(result, reason=reason, final_action="hold")
+    if language == "zh" and "震荡" not in str(result.trend_prediction):
+        result.trend_prediction = "震荡"
+    elif language == "en":
+        result.trend_prediction = "Sideways"
+    elif language == "ko":
+        result.trend_prediction = "횡보"
+    _bound_hold_watch_sentiment_score(result, reason=reason, final_action="hold", upper_bound=50)
     _apply_hold_watch_dashboard(
         result,
         language,
@@ -1579,6 +1628,8 @@ def _set_structural_hold_wording(
         elif language == "ko":
             result.trend_prediction = "횡보"
 
+    if calibrate_score:
+        _apply_hold_trend_lean(result, result.sentiment_score)
     if language == "zh":
         no_position = "空仓先不追涨杀跌，等待支撑确认、放量突破或资金回流后再行动。"
         has_position = "持仓以关键支撑为风控线，未跌破前以观察和分批控仓为主。"
@@ -3918,6 +3969,13 @@ class GeminiAnalyzer:
         if 'chip' in context:
             chip = context['chip']
             profit_ratio = chip.get('profit_ratio', 0)
+            chip_date = chip.get('date') or ''
+            # 命中 last-known-good 缓存时 date 是历史交易日，提示模型注意时效
+            date_row = (
+                f"| 数据日期 | {chip_date} | 非当日数据说明来自缓存/最近交易日，注意时效 |\n"
+                if chip_date
+                else ""
+            )
             prompt += f"""
 ### 筹码分布数据（效率指标）
 | 指标 | 数值 | 健康标准 |
@@ -3927,7 +3985,7 @@ class GeminiAnalyzer:
 | 90%筹码集中度 | {chip.get('concentration_90', 0):.2%} | <15%为集中 |
 | 70%筹码集中度 | {chip.get('concentration_70', 0):.2%} | |
 | 筹码状态 | {chip.get('chip_status', unknown_text)} | |
-"""
+{date_row}"""
         else:
             chip_unavailable_text = get_chip_unavailable_text(report_language)
             chip_instruction = (
@@ -4009,7 +4067,24 @@ class GeminiAnalyzer:
 **一致性约束**：
 {chr(10).join('- ' + note for note in consistency_notes)}
 """
-        
+
+        # 添加 Kronos 时序预测信号（与趋势分析交叉验证）
+        if context.get('kronos_signal'):
+            ks = context['kronos_signal']
+            confidence_label = (
+                '高' if ks['direction_confidence'] >= 80
+                else '中' if ks['direction_confidence'] >= 60
+                else '低'
+            )
+            prompt += f"""
+### Kronos 时序预测信号（交叉验证）
+- 预测方向: {ks['direction']}
+- 置信度: {confidence_label} ({ks['direction_confidence']:.1f}%)
+- 预测区间涨跌幅: {ks['pred_pct_change']:+.2f}%
+- 预测天数: {ks['pred_days']} 个交易日
+- 说明: 基于 {ks['lookback']} 天历史数据的时序预测模型，与上方趋势分析形成交叉验证
+"""
+
         # 添加昨日对比数据
         if 'yesterday' in context:
             volume_change = context.get('volume_change_ratio', 'N/A')
@@ -4350,6 +4425,40 @@ class GeminiAnalyzer:
         """Delegate to module-level apply_placeholder_fill."""
         apply_placeholder_fill(result, missing_fields)
 
+    def _extract_largest_json_object(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """Fallback: extract the largest valid JSON object embedded in text.
+
+        Some LLMs (e.g. GLM-5.2) wrap the JSON response with markdown tables
+        or supplementary instructions, causing the strict extractor to reject
+        the response as "ambiguous_json".  This fallback scans for all
+        top-level JSON objects and returns the largest one.
+        """
+        decoder = json.JSONDecoder()
+        best_str = None
+        best_data = None
+        best_len = 0
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                obj, end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            candidate_str = text[index:index + end]
+            if not isinstance(obj, dict):
+                continue
+            if len(candidate_str) > best_len:
+                try:
+                    validated = self._load_analysis_json_candidate(candidate_str)
+                    best_str = candidate_str
+                    best_data = validated
+                    best_len = len(candidate_str)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+        if best_str is not None:
+            return best_str, best_data
+        raise ValueError("no_embedded_json")
+
     def _extract_analysis_json_object(self, response_text: str) -> Tuple[str, Dict[str, Any]]:
         """Extract the single allowed JSON object from an LLM response."""
 
@@ -4364,28 +4473,29 @@ class GeminiAnalyzer:
         )
         fenced_matches = list(fence_pattern.finditer(text))
         if len(fenced_matches) > 1:
-            raise ValueError("ambiguous_json")
+            return self._extract_largest_json_object(text)
         if len(fenced_matches) == 1:
             match = fenced_matches[0]
             outside = (text[:match.start()] + text[match.end():]).strip()
             if outside:
-                raise ValueError("ambiguous_json")
+                return self._extract_largest_json_object(text)
             fence_lang = (match.group("lang") or "").strip().lower()
             if fence_lang not in {"", "json"}:
-                raise ValueError("ambiguous_json")
+                return self._extract_largest_json_object(text)
             json_str = match.group("body").strip()
             data = self._load_analysis_json_candidate(json_str)
             return json_str, data
         if "```" in text:
-            raise ValueError("ambiguous_json")
+            return self._extract_largest_json_object(text)
 
         try:
             data = self._load_analysis_json_candidate(stripped)
         except json.JSONDecodeError as exc:
             if self._contains_embedded_json_object(text):
-                raise ValueError("ambiguous_json") from exc
+                return self._extract_largest_json_object(text)
             raise
         return stripped, data
+
 
     def _load_analysis_json_candidate(self, json_str: str) -> Dict[str, Any]:
         """Parse one already-selected JSON candidate, repairing common LLM JSON drift."""

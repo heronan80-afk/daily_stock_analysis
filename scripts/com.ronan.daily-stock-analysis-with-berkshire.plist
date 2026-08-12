@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ronan.daily-stock-analysis</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ronan/projects/daily_stock_analysis/venv/bin/python</string>
+        <string>main.py</string>
+        <string>--schedule</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ronan/projects/daily_stock_analysis</string>
+
+    <!-- load 时不立即跑分析，只常驻等待每天 18:00 触发；避免与手动补跑重复 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SCHEDULE_RUN_IMMEDIATELY</key>
+        <string>false</string>
+        <key>AI_BERKSHIRE_ENABLED</key>
+        <string>true</string>
+        <key>AI_BERKSHIRE_PATH</key>
+        <string>/Users/ronan/projects/ai-berkshire</string>
+        <key>AI_BERKSHIRE_SKILL</key>
+        <string>investment-research</string>
+        <key>BRIDGE_SIGNAL_MIN</key>
+        <string>70</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 进程异常退出后自动重启 -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 崩溃重启间隔，避免疯狂重启 -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/launchd_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/ronan/projects/daily_stock_analysis/logs/launchd_stderr.log</string>
+</dict>
+</plist>

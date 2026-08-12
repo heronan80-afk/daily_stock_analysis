@@ -103,7 +103,10 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
         )
         ticker = _build_mock_ticker(info, income_df_with_yoy, cashflow_df, dividends)
 
-        with patch("yfinance.Ticker", return_value=ticker):
+        # 分红 TTM 用滚动 365 天窗口（cutoff = pd.Timestamp.now() - 365d），
+        # 冻结 now 使测试不随真实日期漂移（最早一笔 2025-08-11 必须仍在窗口内）
+        with patch("yfinance.Ticker", return_value=ticker), \
+             patch("pandas.Timestamp.now", return_value=pd.Timestamp("2026-06-30T12:00:00", tz="America/New_York")):
             bundle = YfinanceFundamentalAdapter().get_fundamental_bundle("AAPL")
 
         self.assertEqual(bundle["status"], "partial")
@@ -153,7 +156,9 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
             "trailingAnnualDividendRate": 99.0,  # a WRONG fallback we must NOT fall back to
         }
         ticker = _build_mock_ticker(info, dividends=dividends_df)
-        with patch("yfinance.Ticker", return_value=ticker):
+        # 冻结 now：4 笔分红（最早 2025-08-11）必须在 365 天 TTM 窗口内，防日期漂移
+        with patch("yfinance.Ticker", return_value=ticker), \
+             patch("pandas.Timestamp.now", return_value=pd.Timestamp("2026-06-30T12:00:00", tz="America/New_York")):
             bundle = YfinanceFundamentalAdapter().get_fundamental_bundle("AAPL")
 
         div = bundle["earnings"]["dividend"]
