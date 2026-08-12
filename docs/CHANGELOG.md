@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 筹码分布 last-known-good 磁盘缓存：东财 `stock_cyq_em` 断连失败时回退到最近一次成功值（≤7 天），报告标注"筹码数据截至 YYYY-MM-DD"避免误导；全源失败且无缓存时冷却后补漏重试一轮连接类数据源。
 - [测试] 新增筹码缓存读写/过期、连接类失败补漏重试、data_date 透传相关测试用例。
 - [测试] 修复 `test_pipeline_realtime_indicators` 中 `_enhance_context` 调用：Kronos 集成后第 5 个位置参数变为 `kronos_prediction`，8 个用例把股票名当位置参数传入导致 `AttributeError`，改为 `stock_name=` 关键字传参。
+- [chore] `evals/kronos_test/test_kronos_report.py` 重命名为 `kronos_report.py`：它是依赖 `/tmp/Kronos` 外部模型仓库的独立回测脚本（无 `def test_*`），此前因 `test_` 前缀被 pytest 收集导致 `No module named 'model'` collection error 中断整个套件，需 `--ignore` 绕过；改名后不再被收集，离线套件可去掉该 workaround。
+- [测试] `test_agent_executor::test_single_tool_timeout_marks_tool_failed` 去 flaky：工具 sleep 从 0.05s 提到 1.0s（远超 0.01s 超时），消除负载机器上偶发"未按预期超时"。
 
 ## [3.25.0] - 2026-07-03
 

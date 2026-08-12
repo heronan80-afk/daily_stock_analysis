@@ -1621,7 +1621,9 @@ class TestAgentExecutor(unittest.TestCase):
         registry = ToolRegistry()
 
         def _slow_echo(message):
-            time.sleep(0.05)
+            # 远大于 tool_call_timeout_seconds(0.01s)，保证必然超时；
+            # 0.05s 边距太紧在负载机器上偶发不超时（flaky）
+            time.sleep(1.0)
             return {"echo": message}
 
         registry.register(
