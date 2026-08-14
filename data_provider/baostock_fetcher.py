@@ -17,7 +17,7 @@ BaostockFetcher - 备用数据源 2 (Priority 3)
 import logging
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Generator
 
 import pandas as pd
@@ -37,6 +37,8 @@ from .base import (
     normalize_stock_code,
     _is_hk_market,
 )
+from .realtime_types import ChipDistribution
+from src.services.cyq import calc_cyq_metrics
 import os
 
 logger = logging.getLogger(__name__)
@@ -373,6 +375,94 @@ class BaostockFetcher(BaseFetcher):
             logger.warning(f"Baostock 获取股票列表失败: {e}")
         
         return None
+
+    def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
+        """
+        本地筹码分布（方案 B 后备源）：用 baostock 不复权日 K + 真实换手率 turn
+        在本地推演 CYQ 筹码分布。
+
+        与 TushareFetcher._fetch_local_cyq 共享 src/services/cyq.py 算法，但换手率
+        直接用 baostock 的 turn 字段（百分数），无需 daily_basic 配额或成交量代理。
+        DataFetcherManager 筹码链会自动把它当作独立后备源（source_key=baostock_chip，
+        自带熔断/缓存/补漏重试）；TushareFetcher 本地路径在无 float_share 时也会
+        优先调用它拿到真实换手率。
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            ChipDistribution（最后一个交易日的分布，source="baostock_local"），
+            获取失败/分布退化返回 None
+        """
+        # 与 TushareFetcher 本地筹码一致：美股/港股/北交所不适用
+        if _is_us_code(stock_code) or _is_hk_market(stock_code) or is_bse_code(stock_code):
+            return None
+
+        try:
+            bs_code = self._convert_stock_code(stock_code)
+            now = datetime.now()
+            end_date = now.strftime("%Y-%m-%d")
+            # 约 250 个交易日（一年自然日），足够覆盖筹码换手衰减
+            start_date = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+
+            with self._baostock_session() as bs:
+                # adjustflag=3 不复权：与 Tushare 本地筹码口径一致（换手率关联的是不复权价）
+                rs = bs.query_history_k_data_plus(
+                    code=bs_code,
+                    fields="date,open,high,low,close,volume,turn",
+                    start_date=start_date,
+                    end_date=end_date,
+                    frequency="d",
+                    adjustflag="3",
+                )
+
+                if rs.error_code != '0':
+                    raise DataFetchError(f"Baostock 筹码查询失败: {rs.error_msg}")
+
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
+
+            if not rows:
+                logger.warning(f"[筹码分布] Baostock 未查询到 {stock_code} 的日 K")
+                return None
+
+            df = pd.DataFrame(rows, columns=rs.fields)
+            # turn 为百分数（如 5.48 表示 5.48%），与 cyq.py 的 turnover_rate 列口径一致
+            df = df.rename(columns={"volume": "vol"})
+            for col in ("open", "high", "low", "close", "vol", "turn"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df["turnover_rate"] = df["turn"]
+            df = df.sort_values("date").reset_index(drop=True)
+
+            metrics = calc_cyq_metrics(df)
+            if metrics is None:
+                logger.warning(f"[筹码分布] Baostock 本地分布退化（窗口内换手全为 0） {stock_code}")
+                return None
+
+            chip = ChipDistribution(
+                code=stock_code,
+                date=metrics["date"],  # baostock 日期已是 YYYY-MM-DD
+                source="baostock_local",
+                profit_ratio=metrics["profit_ratio"],
+                avg_cost=metrics["avg_cost"],
+                cost_90_low=metrics["cost_90_low"],
+                cost_90_high=metrics["cost_90_high"],
+                concentration_90=metrics["concentration_90"],
+                cost_70_low=metrics["cost_70_low"],
+                cost_70_high=metrics["cost_70_high"],
+                concentration_70=metrics["concentration_70"],
+            )
+            logger.info(
+                f"[筹码分布] {stock_code} baostock 本地算法 日期={chip.date}: "
+                f"获利比例={chip.profit_ratio:.1%}, 平均成本={chip.avg_cost}, "
+                f"90%集中度={chip.concentration_90:.2%}"
+            )
+            return chip
+
+        except Exception as e:
+            logger.warning(f"[筹码分布] Baostock 本地筹码计算失败 {stock_code}: {e}")
+            return None
 
 
 if __name__ == "__main__":

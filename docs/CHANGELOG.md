@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 修复 `test_pipeline_realtime_indicators` 中 `_enhance_context` 调用：Kronos 集成后第 5 个位置参数变为 `kronos_prediction`，8 个用例把股票名当位置参数传入导致 `AttributeError`，改为 `stock_name=` 关键字传参。
 - [chore] `evals/kronos_test/test_kronos_report.py` 重命名为 `kronos_report.py`：它是依赖 `/tmp/Kronos` 外部模型仓库的独立回测脚本（无 `def test_*`），此前因 `test_` 前缀被 pytest 收集导致 `No module named 'model'` collection error 中断整个套件，需 `--ignore` 绕过；改名后不再被收集，离线套件可去掉该 workaround。
 - [测试] `test_agent_executor::test_single_tool_timeout_marks_tool_failed` 去 flaky：工具 sleep 从 0.05s 提到 1.0s（远超 0.01s 超时），消除负载机器上偶发"未按预期超时"。
+- [新功能] 筹码分布本地 CYQ 算法兜底（方案 B）：`TushareFetcher` 在 `cyq_chips` 无权限/失败时，用 Tushare 日 K（不复权）+ 换手率在本地推演东财同款筹码分布（`src/services/cyq.py`，150 价格档 + 换手率衰减 + 三角分布），摆脱 `ak.stock_cyq_em` 断连依赖；换手率优先 `daily_basic` 批量 float_share（磁盘缓存 30 天），限流时退化为成交量代理，纯本地计算对日报告零额外耗时。
+- [测试] 新增本地 CYQ 算法单测 `tests/test_cyq_local.py` + `get_chip_distribution` 本地兜底集成测试（真实 float_share 路径与成交量代理路径）。
+- [chore] 升级 akshare 1.18.64 → 1.18.91（离线套件 4311 passed / 7 既有失败无回归；东财筹码接口断连为 IP 级封禁，非版本问题，本地 CYQ 兜底不受影响）。
+- [改进] 本地筹码分布新增 baostock 换手率后备源：`BaostockFetcher.get_chip_distribution` 用不复权日 K + 真实 `turn` 换手率跑本地 CYQ 算法（免费无配额、独立于东财，免疫 `ak.stock_cyq_em` IP 级断连），作为管理器筹码链中的独立后备源；`TushareFetcher` 本地路径在无 float_share 时优先改用 baostock 真实换手率，失败才退化成交量代理。
+- [测试] 新增 `tests/test_baostock_chip_backup.py`（baostock 本地筹码 6 用例）+ `_fetch_local_cyq` 优先 baostock 路径集成测试。
 
 ## [3.25.0] - 2026-07-03
 

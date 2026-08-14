@@ -34,6 +34,7 @@ from tenacity import (
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
 from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
 from src.config import get_config
+from src.services.cyq import calc_cyq_metrics
 import os
 from zoneinfo import ZoneInfo
 
@@ -63,13 +64,29 @@ def _is_etf_code(stock_code: str) -> bool:
 def _is_us_code(stock_code: str) -> bool:
     """
     判断代码是否为美股
-    
+
     美股代码规则：
     - 1-5个大写字母，如 'AAPL', 'TSLA'
     - 可能包含 '.'，如 'BRK.B'
     """
     code = stock_code.strip().upper()
     return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
+
+
+def _baostock_local_chip(stock_code: str) -> Optional[ChipDistribution]:
+    """用 baostock 真实换手率日 K 计算筹码分布（换手率后备源）。
+
+    Tushare 本地筹码在无 float_share（daily_basic 限流/失败）时优先用 baostock
+    的真实换手率，而不是直接用成交量代理；baostock 免费、无配额、独立于东财，
+    免疫 `ak.stock_cyq_em` 的 IP 级断连。失败返回 None，调用方退化为成交量代理。
+    """
+    try:
+        from .baostock_fetcher import BaostockFetcher
+
+        return BaostockFetcher().get_chip_distribution(stock_code)
+    except Exception as e:  # noqa: BLE001 - 后备源失败不影响主流程
+        logger.warning(f"[Tushare] baostock 本地筹码后备源失败 {stock_code}: {e}")
+        return None
 
 
 class _TushareHttpClient:
@@ -1177,10 +1194,10 @@ class TushareFetcher(BaseFetcher):
             return None
         
         try:
-            # 19点之后才有当天数据
-            start_date = self.get_trade_time(early_time='00:00', late_time='19:00') 
+            # 19点之后才有当天数据（cyq_chips 接口；本地算法兜底不受此门禁限制）
+            start_date = self.get_trade_time(early_time='00:00', late_time='19:00')
             if not start_date:
-                return None
+                return self._fetch_local_cyq(stock_code)
 
             ts_code = self._convert_stock_code(stock_code)
 
@@ -1198,7 +1215,7 @@ class TushareFetcher(BaseFetcher):
                     end_date=start_date,
                 )
                 if daily_df is None or daily_df.empty:
-                    return None
+                    return self._fetch_local_cyq(stock_code)
                 current_price = daily_df.iloc[0]['close']
                 metrics = self.compute_cyq_metrics(df, current_price)
 
@@ -1214,14 +1231,186 @@ class TushareFetcher(BaseFetcher):
                     cost_70_high=metrics['70成本-高'],
                     concentration_70=metrics['70集中度'],
                 )
-                
+
                 logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
                         f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
                         f"70%集中度={chip.concentration_70:.2%}")
                 return chip
 
+            # cyq_chips 无数据（如账号无接口权限 / 限流）→ 本地 CYQ 算法兜底
+            return self._fetch_local_cyq(stock_code)
+
         except Exception as e:
             logger.warning(f"[Tushare] 获取筹码分布失败 {stock_code}: {e}")
+            return self._fetch_local_cyq(stock_code)
+
+    # 本地筹码计算：换手率来源策略。
+    # 账号配额限制（daily_basic/stock_basic 均约 1 次/分钟~小时），无法逐股逐日取真实换手率。
+    # 策略：优先 daily_basic(trade_date=...) 一次批量拉全市场当日 float_share（1 次/运行，
+    # 磁盘缓存 30 天），换手率 = vol/float_share 本地算；无 float_share 时优先 baostock 真实
+    # 换手率（免费无配额、独立于东财）；两者都不可用时退化为「成交量代理」
+    # 换手率（纯 pro.daily，零限流依赖，永远可用）。
+    _FLOAT_SHARE_CACHE_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "data", "cache", "float_share.json"
+    )
+    _FLOAT_SHARE_CACHE_TTL_SECONDS = 30 * 24 * 3600  # 30 天
+    # 成交量代理换手率的参考日均换手（A 股典型值 2.5%）
+    _TURNOVER_PROXY_REF = 0.025
+
+    def _save_float_share_cache(self, mapping: Dict[str, float]) -> None:
+        """把全市场 float_share 映射落盘（原子写），供限流时复用。"""
+        try:
+            os.makedirs(os.path.dirname(self._FLOAT_SHARE_CACHE_FILE), exist_ok=True)
+            payload = {"saved_at": time.time(), "map": mapping}
+            tmp_path = self._FLOAT_SHARE_CACHE_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                _json.dump(payload, fh)
+            os.replace(tmp_path, self._FLOAT_SHARE_CACHE_FILE)
+        except Exception as e:  # noqa: BLE001 - 缓存失败不影响主流程
+            logger.warning(f"[Tushare] float_share 磁盘缓存写入失败: {e}")
+
+    def _get_float_share_map(self, trade_date: str) -> Optional[Dict[str, float]]:
+        """返回全市场流通股本映射 {ts_code: float_share(万股)}，优先缓存。
+
+        顺序：实例内存缓存 → 磁盘缓存(30 天) → daily_basic(trade_date=...) 批量拉一次。
+        全部失败返回 None，调用方退化为成交量代理换手率。
+        """
+        cached = getattr(self, "_local_float_share_map", None)
+        if cached:
+            return cached
+
+        # 磁盘缓存
+        try:
+            if os.path.exists(self._FLOAT_SHARE_CACHE_FILE):
+                with open(self._FLOAT_SHARE_CACHE_FILE, "r", encoding="utf-8") as fh:
+                    payload = _json.load(fh)
+                if time.time() - float(payload.get("saved_at", 0)) <= self._FLOAT_SHARE_CACHE_TTL_SECONDS:
+                    mapping = {str(k): float(v) for k, v in payload.get("map", {}).items()}
+                    self._local_float_share_map = mapping
+                    logger.info(f"[Tushare] 本地筹码 float_share 使用磁盘缓存（{len(mapping)} 只）")
+                    return mapping
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Tushare] float_share 磁盘缓存读取失败: {e}")
+
+        # 批量拉取（单次调用返回全市场当日 float_share，1 次/运行）
+        try:
+            basic = self._call_api_with_rate_limit(
+                "daily_basic",
+                trade_date=trade_date,
+                fields="ts_code,float_share",
+            )
+            if basic is not None and not basic.empty and "float_share" in basic.columns:
+                basic = basic.dropna(subset=["float_share"])
+                mapping = dict(zip(basic["ts_code"].astype(str), basic["float_share"].astype(float)))
+                self._local_float_share_map = mapping
+                self._save_float_share_cache(mapping)
+                logger.info(f"[Tushare] 本地筹码 float_share 批量拉取 {len(mapping)} 只")
+                return mapping
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Tushare] float_share 批量拉取失败（将退化为成交量代理换手率）: {e}")
+        # 失败也缓存空映射，避免同一运行内每只股票都重复触发限流接口
+        self._local_float_share_map = {}
+        return None
+
+    def _fetch_local_cyq(self, stock_code: str) -> Optional[ChipDistribution]:
+        """
+        本地筹码分布兜底（方案 B）：用 Tushare 日 K（不复权）+ 换手率在本地
+        推演东财同款 CYQ 筹码分布，摆脱 `ak.stock_cyq_em` 的断连依赖。
+
+        数据来源：pro.daily（OHLC+vol，稳定）+ float_share（daily_basic 批量/缓存），
+        换手率本地算；无 float_share 时优先 baostock 真实换手率（后备源，见
+        BaostockFetcher.get_chip_distribution），再退化为成交量代理。口径与
+        akshare stock_cyq_em 一致（range=0 全量累计）。
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            ChipDistribution 对象（最后一个交易日的分布），计算失败返回 None
+        """
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+            now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+            end_date = now_cn.strftime("%Y%m%d")
+            # 约 250 个交易日（一年自然日），足够覆盖筹码换手衰减
+            start_date = (now_cn - timedelta(days=365)).strftime("%Y%m%d")
+
+            daily_df = self._call_api_with_rate_limit(
+                "daily",
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if daily_df is None or daily_df.empty:
+                logger.warning(f"[Tushare] 本地筹码计算缺少日K数据 {stock_code}")
+                return None
+
+            merged = daily_df.rename(columns={"trade_date": "date"})
+            merged = merged.sort_values("date").reset_index(drop=True)
+            merged["turnover_rate"] = float("nan")
+            merged["float_share"] = float("nan")
+
+            # 换手率：优先真实 float_share（批量/缓存），否则 baostock 真实换手率
+            # （后备源，免费无配额、独立于东财），最后退化为成交量代理
+            last_trade_date = str(merged["date"].iloc[-1])
+            float_map = self._get_float_share_map(last_trade_date)
+            if float_map and ts_code in float_map:
+                merged["float_share"] = float(float_map[ts_code])
+            else:
+                bs_chip = _baostock_local_chip(stock_code)
+                if bs_chip is not None:
+                    logger.info(f"[Tushare] {stock_code} 本地筹码改用 baostock 真实换手率源")
+                    return bs_chip
+                if "vol" in merged.columns and merged["vol"].notna().any():
+                    med_vol = merged["vol"].median()
+                    if med_vol and med_vol > 0:
+                        merged["turnover_rate"] = (
+                            merged["vol"] / med_vol * self._TURNOVER_PROXY_REF * 100.0
+                        ).clip(0, 100)
+                        logger.info(
+                            f"[Tushare] {stock_code} 本地筹码用成交量代理换手率（无 float_share，baostock 不可用）"
+                        )
+                    else:
+                        logger.warning(f"[Tushare] {stock_code} 本地筹码缺有效 vol，无法计算换手率")
+                        return None
+                else:
+                    logger.warning(f"[Tushare] {stock_code} 本地筹码缺 vol 列，无法计算换手率")
+                    return None
+
+            metrics = calc_cyq_metrics(merged)
+            if metrics is None:
+                logger.warning(f"[Tushare] 本地筹码分布退化（窗口内换手全为 0） {stock_code}")
+                return None
+
+            # pro.daily 的 trade_date 为 YYYYMMDD，统一格式化为 YYYY-MM-DD（与 akshare/cyq_chips 口径一致）
+            raw_date = str(metrics["date"])
+            try:
+                date_str = datetime.strptime(raw_date, "%Y%m%d").strftime("%Y-%m-%d")
+            except ValueError:
+                date_str = raw_date
+
+            chip = ChipDistribution(
+                code=stock_code,
+                date=date_str,
+                source="tushare_local",
+                profit_ratio=metrics["profit_ratio"],
+                avg_cost=metrics["avg_cost"],
+                cost_90_low=metrics["cost_90_low"],
+                cost_90_high=metrics["cost_90_high"],
+                concentration_90=metrics["concentration_90"],
+                cost_70_low=metrics["cost_70_low"],
+                cost_70_high=metrics["cost_70_high"],
+                concentration_70=metrics["concentration_70"],
+            )
+            logger.info(
+                f"[筹码分布] {stock_code} 本地算法 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
+                f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
+                f"70%集中度={chip.concentration_70:.2%}"
+            )
+            return chip
+
+        except Exception as e:
+            logger.warning(f"[Tushare] 本地筹码分布计算失败 {stock_code}: {e}")
             return None
 
     def compute_cyq_metrics(self, df: pd.DataFrame, current_price: float) -> dict:
