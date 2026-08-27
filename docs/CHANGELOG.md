@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [chore] 升级 akshare 1.18.64 → 1.18.91（离线套件 4311 passed / 7 既有失败无回归；东财筹码接口断连为 IP 级封禁，非版本问题，本地 CYQ 兜底不受影响）。
 - [改进] 本地筹码分布新增 baostock 换手率后备源：`BaostockFetcher.get_chip_distribution` 用不复权日 K + 真实 `turn` 换手率跑本地 CYQ 算法（免费无配额、独立于东财，免疫 `ak.stock_cyq_em` IP 级断连），作为管理器筹码链中的独立后备源；`TushareFetcher` 本地路径在无 float_share 时优先改用 baostock 真实换手率，失败才退化成交量代理。
 - [测试] 新增 `tests/test_baostock_chip_backup.py`（baostock 本地筹码 6 用例）+ `_fetch_local_cyq` 优先 baostock 路径集成测试。
+- [修复] `evals/kronos_base_compare.py` Kronos 对比回测：同一 predictor 被多线程并发调用导致随机 tensor mismatch（曾污染 8/4 结论），为每个模型实例加 `threading.Lock` 串行化 predict；并固定随机种子（seed=42）使结果可复现。修复后 285/285 全样本、0 错误，确认 Kronos-small 整体优于 Kronos-base（69.5% vs 61.8%）。
+- [chore] Kronos 模型源码从易失的 `/tmp/Kronos` 迁移到持久目录 `~/kronos/Kronos`（`kronos_service.py`/`kronos_base_compare.py` 默认值与 `kronos_eval.py`/`kronos_sweep.py`/`run_kronos_eval.py`/`kronos_test/kronos_report.py` 路径同步更新，均支持 `KRONOS_PATH` 环境变量覆盖），避免 `/tmp` 被系统清理后模型丢失。
 
 ## [3.25.0] - 2026-07-03
 

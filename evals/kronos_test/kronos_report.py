@@ -4,7 +4,7 @@ import sys, os, json
 import pandas as pd
 import numpy as np
 
-sys.path.insert(0, '/tmp/Kronos')
+sys.path.insert(0, os.environ.get("KRONOS_PATH", os.path.expanduser("~/kronos/Kronos")))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 

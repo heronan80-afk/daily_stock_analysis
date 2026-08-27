@@ -37,7 +37,7 @@ else:
     from .kronos_eval import _load_kronos, _fetch_data, run_kronos_prediction, calc_metrics
 
 # Kronos 路径
-KRONOS_PATH = "/tmp/Kronos"
+KRONOS_PATH = os.environ.get("KRONOS_PATH", os.path.expanduser("~/kronos/Kronos"))
 if KRONOS_PATH not in sys.path:
     sys.path.insert(0, KRONOS_PATH)
 

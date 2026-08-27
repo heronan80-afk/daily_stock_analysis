@@ -9,7 +9,7 @@ Kronos 时序预测服务 — 生产环境封装
 4. 模型不可用或预测失败时优雅降级（available=False，不抛出异常）
 
 依赖：
-- Kronos 模型代码路径：/tmp/Kronos（可通过 KRONOS_PATH 环境变量覆盖）
+- Kronos 模型代码路径：~/kronos/Kronos（可通过 KRONOS_PATH 环境变量覆盖）
 - HuggingFace 模型：NeoQuasar/Kronos-small（已缓存在 ~/.cache/huggingface/）
 - 个股参数：复用 evals/kronos_params.get_stock_params
 """
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # 模型路径
 _PREDICTOR_CACHE: dict = {}  # model_name -> predictor
-_KRONOS_PATH = os.environ.get("KRONOS_PATH", "/tmp/Kronos")
+_KRONOS_PATH = os.environ.get("KRONOS_PATH", os.path.expanduser("~/kronos/Kronos"))
 _KRONOS_MODEL_NAME = os.environ.get("KRONOS_MODEL_NAME", "Kronos-small")
 _KRONOS_DEVICE = os.environ.get("KRONOS_DEVICE", "cpu")
 

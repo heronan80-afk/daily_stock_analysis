@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
@@ -26,6 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 # 项目根目录
@@ -101,9 +104,13 @@ BULLISH_CONFIDENCE = 78.2
 
 # ── 模型加载 ──────────────────────────────────────────────────────────
 
-_KRONOS_PATH = os.environ.get("KRONOS_PATH", "/tmp/Kronos")
+_KRONOS_PATH = os.environ.get("KRONOS_PATH", os.path.expanduser("~/kronos/Kronos"))
 
 _PREDICTOR_CACHE: dict = {}
+
+# Kronos 模型推理非线程安全（自回归 buffer 共享状态），并发调用同一实例
+# 会触发 tensor size mismatch。每个模型实例配一把锁，串行化 predict 调用。
+_PREDICTOR_LOCKS: dict = {}
 
 
 def _load_kronos(model_name: str, device: str = "cpu"):
@@ -133,6 +140,7 @@ def _load_kronos(model_name: str, device: str = "cpu"):
 
     predictor = KronosPredictor(model, tokenizer, device=device, max_context=512)
     _PREDICTOR_CACHE[cache_key] = predictor
+    _PREDICTOR_LOCKS.setdefault(model_name, threading.Lock())
     return predictor
 
 
@@ -258,11 +266,12 @@ def run_prediction(
     y_ts = after.iloc[:actual_len]["date"].reset_index(drop=True)
 
     try:
-        pred_df = predictor.predict(
-            df=x_df, x_timestamp=x_ts, y_timestamp=y_ts,
-            pred_len=actual_len, T=T, top_p=top_p,
-            sample_count=sample_count, verbose=False,
-        )
+        with _PREDICTOR_LOCKS[model_name]:
+            pred_df = predictor.predict(
+                df=x_df, x_timestamp=x_ts, y_timestamp=y_ts,
+                pred_len=actual_len, T=T, top_p=top_p,
+                sample_count=sample_count, verbose=False,
+            )
     except Exception as e:
         return KronosPredResult(
             stock_code=stock_code, stock_name=stock_name,
@@ -569,6 +578,14 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s: %(message)s",
     )
+
+    # 固定随机种子：Kronos 自回归采样（torch.multinomial）默认无种子，
+    # 不固定会导致每次运行同一样本预测值不同，结论不可复现。
+    RANDOM_SEED = 42
+    random.seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+    import torch
+    torch.manual_seed(RANDOM_SEED)
 
     out_dir = ROOT / "evals" / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
