@@ -883,6 +883,11 @@ class TushareFetcher(BaseFetcher):
                     logger.debug(f"Tushare 获取指数 {name} 失败: {e}")
                     continue
 
+            if results and len(results) != len(indices_map):
+                logger.warning(
+                    f"[Tushare] 指数行情不完整 {len(results)}/{len(indices_map)}，放弃本数据源让 fallback 继续"
+                )
+                return None
             if results:
                 return results
             else:
