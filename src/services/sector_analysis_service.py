@@ -81,9 +81,17 @@ class SectorAnalysisService:
         self.index_config = INDEX_CONFIG
 
     def is_trading_day(self) -> bool:
-        """判断今天是否为交易日（周末不交易）"""
+        """判断今天是否为 A 股交易日。
+
+        周末直接排除，其余日期走项目统一交易日历（exchange-calendars 的 XSHG），
+        与 main.py 的交易日检查口径一致，覆盖法定节假日与调休。
+        日历不可用或日期超出范围时 fail-open，退回原有的周末判断。
+        """
         today = datetime.datetime.now()
-        return today.weekday() < 5
+        if today.weekday() >= 5:
+            return False
+        from src.core.trading_calendar import is_market_open
+        return is_market_open("cn", today.date())
 
     # --- Wind MCP 数据获取方法 ---
     # TODO: 这些方法依赖子进程调用 MCP 技能，shell 路径为硬编码。
@@ -462,12 +470,12 @@ class SectorAnalysisService:
         if report_date is None:
             report_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
-        logger.info("开始执行板块分析（日期: %s）...", report_date)
-
-        # 1. 确认是否为交易日
+        # 1. 确认是否为交易日（非交易日直接跳过，不取数、不出报告、不推送）
         if not self.is_trading_day():
-            logger.info("今天是周末，不是交易日")
+            logger.info("今天不是 A 股交易日（周末或法定节假日），跳过板块分析")
             return None
+
+        logger.info("开始执行板块分析（日期: %s）...", report_date)
 
         # 2. 获取股票行情数据
         all_stock_data = self.get_sector_stock_data()

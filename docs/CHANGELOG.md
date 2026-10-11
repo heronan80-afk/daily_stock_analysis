@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 新增 `tests/test_baostock_chip_backup.py`（baostock 本地筹码 6 用例）+ `_fetch_local_cyq` 优先 baostock 路径集成测试。
 - [修复] `evals/kronos_base_compare.py` Kronos 对比回测：同一 predictor 被多线程并发调用导致随机 tensor mismatch（曾污染 8/4 结论），为每个模型实例加 `threading.Lock` 串行化 predict；并固定随机种子（seed=42）使结果可复现。修复后 285/285 全样本、0 错误，确认 Kronos-small 整体优于 Kronos-base（69.5% vs 61.8%）。
 - [chore] Kronos 模型源码从易失的 `/tmp/Kronos` 迁移到持久目录 `~/kronos/Kronos`（`kronos_service.py`/`kronos_base_compare.py` 默认值与 `kronos_eval.py`/`kronos_sweep.py`/`run_kronos_eval.py`/`kronos_test/kronos_report.py` 路径同步更新，均支持 `KRONOS_PATH` 环境变量覆盖），避免 `/tmp` 被系统清理后模型丢失。
+- [修复] A股板块报告交易日检查：`SectorAnalysisService.is_trading_day()` 原先只判断周末（`weekday() < 5`），法定节假日落在工作日时（如国庆 10/1-10/7）仍会照常取数并推送报告；改为复用项目统一交易日历 `src/core/trading_calendar`（exchange-calendars XSHG，与 `main.py` 同一口径，覆盖节假日与调休），日历不可用或日期超出范围时 fail-open 并保留周末判断；检查点前移至取数之前，非交易日不取数、不出报告、不推送。
 
 ## [3.25.0] - 2026-07-03
 
