@@ -2094,6 +2094,73 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class MxSearchProvider(BaseSearchProvider):
+    """东方财富妙想资讯搜索（权威金融资讯，仅需 MX_APIKEY）。
+
+    基于金融场景进行信源智能筛选，返回新闻/公告/研报等资讯。
+    """
+
+    BASE_URL = "https://mkapi2.dfcfs.com/finskillshub/api/claw/news-search"
+    _TYPE_CN = {"REPORT": "研报", "NEWS": "新闻", "ANNOUNCEMENT": "公告"}
+
+    def __init__(self, api_keys: List[str]):
+        super().__init__(api_keys, name="MxSearch")
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        headers = {"Content-Type": "application/json", "apikey": api_key}
+        response = requests.post(
+            self.BASE_URL,
+            headers=headers,
+            json={"query": query},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != 0:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=(result.get("message") or "")[:200],
+            )
+
+        inner = (result.get("data") or {}).get("data") or {}
+        items = ((inner.get("llmSearchResponse") or {}).get("data")) or []
+        results: List[SearchResult] = []
+        for item in items:
+            if len(results) >= max_results:
+                break
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            content = str(item.get("content") or "").strip()
+            source = str(item.get("source") or item.get("author") or "").strip()
+            info_type = str(item.get("informationType") or "")
+            type_cn = self._TYPE_CN.get(info_type, "")
+            if source and type_cn:
+                source = f"{source}（{type_cn}）"
+            elif not source:
+                source = type_cn or "东方财富"
+            results.append(
+                SearchResult(
+                    title=title,
+                    snippet=content,
+                    url=str(item.get("jumpUrl") or "").strip(),
+                    source=source or "东方财富",
+                    published_date=str(item.get("date") or "").strip()[:10] or None,
+                )
+            )
+        success = bool(results)
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self._name,
+            success=success,
+            error_message=None if success else "未找到相关资讯",
+        )
+
+
 class SearchService:
     """
     搜索服务
@@ -2266,6 +2333,7 @@ class SearchService:
         searxng_public_instances_enabled: bool = True,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
+        mx_keys: Optional[List[str]] = None,
     ):
         """
         初始化搜索服务
@@ -2281,6 +2349,7 @@ class SearchService:
             searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
+            mx_keys: 东方财富妙想资讯搜索 API Key 列表（MX_APIKEY）
         """
         self._providers: List[BaseSearchProvider] = []
         self.news_max_age_days = max(1, news_max_age_days)
@@ -2342,7 +2411,12 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
-            
+
+        # 8. 妙想资讯搜索（东方财富权威金融资讯，优先使用；每日约 150 次调用上限）
+        if mx_keys:
+            self._providers.insert(0, MxSearchProvider(mx_keys))
+            logger.info(f"已配置 MxSearch 资讯搜索，共 {len(mx_keys)} 个 API Key")
+
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 
@@ -3608,13 +3682,14 @@ class SearchService:
             # 如果提供了关键词，直接使用关键词作为查询
             query = " ".join(focus_keywords)
         elif prefer_chinese:
-            query = f"{stock_name} {stock_code} 股票 最新消息"
+            # "今日"帮助妙想资讯搜索返回时效内新闻（否则多返回历史/百科内容被过滤）
+            query = f"{stock_name} {stock_code} 今日 股票 最新消息"
         elif is_foreign:
             # 港股/美股使用英文搜索关键词
             query = f"{stock_name} {stock_code} stock latest news"
         else:
             # 默认主查询：股票名称 + 核心关键词
-            query = f"{stock_name} {stock_code} 股票 最新消息"
+            query = f"{stock_name} {stock_code} 今日 股票 最新消息"
 
         logger.info(
             (
@@ -4456,6 +4531,7 @@ def get_search_service() -> SearchService:
                     searxng_public_instances_enabled=config.searxng_public_instances_enabled,
                     news_max_age_days=config.news_max_age_days,
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
+                    mx_keys=config.mx_api_keys,
                 )
     
     return _search_service

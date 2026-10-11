@@ -820,6 +820,7 @@ class Config:
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
     searxng_public_instances_enabled: bool = True  # Auto-discover public SearXNG instances when base URLs are absent
+    mx_api_keys: List[str] = field(default_factory=list)  # 东方财富妙想资讯搜索 MX_APIKEY（每日约 150 次）
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1529,6 +1530,14 @@ class Config:
         brave_keys_str = os.getenv('BRAVE_API_KEYS', '')
         brave_api_keys = [k.strip() for k in brave_keys_str.split(',') if k.strip()]
 
+        # 妙想资讯搜索：优先 MX_API_KEYS（逗号分隔多 Key），否则回退单 Key MX_APIKEY
+        mx_keys_str = os.getenv('MX_API_KEYS', '')
+        mx_api_keys = [k.strip() for k in mx_keys_str.split(',') if k.strip()]
+        if not mx_api_keys:
+            _mx_single_key = (os.getenv('MX_APIKEY', '') or '').strip()
+            if _mx_single_key:
+                mx_api_keys = [_mx_single_key]
+
         _raw_urls = [u.strip() for u in os.getenv('SEARXNG_BASE_URLS', '').split(',') if u.strip()]
         searxng_base_urls = []
         invalid_searxng_urls = []
@@ -1705,6 +1714,7 @@ class Config:
             serpapi_keys=serpapi_keys,
             searxng_base_urls=searxng_base_urls,
             searxng_public_instances_enabled=searxng_public_instances_enabled,
+            mx_api_keys=mx_api_keys,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,
             social_sentiment_api_url=os.getenv('SOCIAL_SENTIMENT_API_URL', 'https://api.adanos.org').rstrip('/'),
             news_max_age_days=parse_env_int(os.getenv('NEWS_MAX_AGE_DAYS'), 3, field_name='NEWS_MAX_AGE_DAYS', minimum=1),
@@ -2677,6 +2687,7 @@ class Config:
             or self.tavily_api_keys
             or self.brave_api_keys
             or self.serpapi_keys
+            or self.mx_api_keys
             or self.has_searxng_enabled()
         )
 

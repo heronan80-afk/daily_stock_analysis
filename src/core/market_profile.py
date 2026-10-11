@@ -31,9 +31,9 @@ CN_PROFILE = MarketProfile(
     region="cn",
     mood_index_code="000001",
     news_queries=[
-        "A股 大盘 复盘",
-        "股市 行情 分析",
-        "A股 市场 热点 板块",
+        "今日 A股 市场 行情",
+        "今日 A股 大盘 走势",
+        "A股 市场 热点 板块 异动",
     ],
     prompt_index_hint="分析上证、深证、创业板等各指数走势特点",
     has_market_stats=True,

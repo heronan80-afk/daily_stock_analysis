@@ -344,6 +344,7 @@ def _build_hotspot_event_routes_from_search(topic: str, config: Config) -> List[
             searxng_public_instances_enabled=False,
             news_max_age_days=int(getattr(config, "news_max_age_days", 3) or 3),
             news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
+            mx_keys=getattr(config, "mx_api_keys", None),
         )
         response = service.search_stock_news(
             topic_text,

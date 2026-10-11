@@ -115,6 +115,7 @@ class TestFetcherSourceOptimization(unittest.TestCase):
                 "LONGBRIDGE_APP_KEY": "",
                 "LONGBRIDGE_APP_SECRET": "",
                 "LONGBRIDGE_ACCESS_TOKEN": "",
+                "MX_APIKEY": "",
             },
         ), patch("data_provider.efinance_fetcher.EfinanceFetcher", return_value=_StubFetcher("EfinanceFetcher", 0)), patch(
             "data_provider.tencent_fetcher.TencentFetcher",
@@ -193,6 +194,41 @@ class TestFetcherSourceOptimization(unittest.TestCase):
         self.assertIn("LongbridgeFetcher", manager.available_fetchers)
         self.assertIn("TencentFetcher", manager.available_fetchers)
         mock_longbridge.assert_called_once()
+
+    @patch("src.config.get_config")
+    def test_manager_enables_mxdata_with_api_key(self, mock_get_config):
+        mock_get_config.return_value = SimpleNamespace(tushare_token="")
+
+        with patch.dict("os.environ", {"MX_APIKEY": "test-mx-key"}), patch(
+            "data_provider.efinance_fetcher.EfinanceFetcher",
+            return_value=_StubFetcher("EfinanceFetcher", 0),
+        ), patch(
+            "data_provider.tencent_fetcher.TencentFetcher",
+            return_value=_StubFetcher("TencentFetcher", 0),
+        ), patch(
+            "data_provider.akshare_fetcher.AkshareFetcher",
+            return_value=_StubFetcher("AkshareFetcher", 1),
+        ), patch(
+            "data_provider.pytdx_fetcher.PytdxFetcher",
+            return_value=_StubFetcher("PytdxFetcher", 2),
+        ), patch(
+            "data_provider.baostock_fetcher.BaostockFetcher",
+            return_value=_StubFetcher("BaostockFetcher", 3),
+        ), patch(
+            "data_provider.yfinance_fetcher.YfinanceFetcher",
+            return_value=_StubFetcher("YfinanceFetcher", 4),
+        ), patch(
+            "data_provider.tushare_fetcher.TushareFetcher",
+            return_value=_StubFetcher("TushareFetcher", -1),
+        ), patch(
+            "data_provider.mxdata_fetcher.MxDataFetcher",
+            return_value=_StubFetcher("MxDataFetcher", -2),
+        ) as mock_mx:
+            manager = DataFetcherManager()
+
+        self.assertIn("MxDataFetcher", manager.available_fetchers)
+        self.assertIn("TencentFetcher", manager.available_fetchers)
+        mock_mx.assert_called_once()
 
     @patch("src.config.get_config")
     def test_us_realtime_route_skips_temporarily_unavailable_longbridge(self, mock_get_config):

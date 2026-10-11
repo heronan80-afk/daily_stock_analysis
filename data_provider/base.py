@@ -1257,6 +1257,14 @@ class DataFetcherManager:
         yfinance = YfinanceFetcher()
         optional_fetchers: List[BaseFetcher] = []
 
+        mx_api_key = (os.getenv("MX_APIKEY") or "").strip()
+        if mx_api_key:
+            from .mxdata_fetcher import MxDataFetcher
+
+            optional_fetchers.append(MxDataFetcher())
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 MxDataFetcher")
+
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
         if tushare_token:
             optional_fetchers.append(TushareFetcher())  # 会根据 Token 配置自动调整优先级

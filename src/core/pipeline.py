@@ -240,6 +240,7 @@ class StockAnalysisPipeline:
                 searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
                 news_max_age_days=self.config.news_max_age_days,
                 news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
+                mx_keys=self.config.mx_api_keys,
             )
         except Exception as exc:
             logger.warning("搜索服务初始化失败，将以无搜索模式运行: %s", exc, exc_info=True)
