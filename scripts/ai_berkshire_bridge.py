@@ -27,6 +27,7 @@ Environment:
   AI_BERKSHIRE_SKILL   Claude skill to invoke (default: investment-research)
   FEISHU_WEBHOOK_URL   Feishu webhook URL for notification (optional)
   BRIDGE_SIGNAL_MIN    Minimum signal strength to trigger research (default: 70)
+  BRIDGE_CLAUDE_TIMEOUT  Per-stock Claude CLI timeout in seconds (default: 900)
   CLAUDE_CLI_PATH      Path to Claude CLI (default: auto-detect)
 """
 
@@ -56,7 +57,9 @@ DEFAULT_AI_BERKSHIRE_PATH = os.path.expanduser("~/projects/ai-berkshire")
 DEFAULT_SKILL = "investment-research"
 DEFAULT_SIGNAL_MIN = 60  # Research score >= 60 (bullish) or <= 40 (bearish)
 DEFAULT_MAX_SIGNALS = 6  # Cap research per run - each stock invokes Claude CLI
-DEFAULT_CLAUDE_TIMEOUT = 300  # 5 minutes max per research call
+DEFAULT_CLAUDE_TIMEOUT = 900  # 15 min per research call; investment-research framework
+                              # (background data-collection agents + multi-source cross-check
+                              # + financial_rigor + report_audit) routinely exceeds 5 min.
 
 # Action keywords - matched as substrings so daily_stock_analysis's compound
 # advice (e.g. "减仓/卖出", "观望/减仓") still triggers. daily emits "减仓"
@@ -453,6 +456,34 @@ def resolve_question_for_stock(
     return base
 
 
+def load_skill_prompt(
+    skill: str,
+    ai_berkshire_path: str = DEFAULT_AI_BERKSHIRE_PATH,
+) -> Optional[str]:
+    """Load an ai-berkshire skill file's contents to use as an inlined prompt.
+
+    ai-berkshire stores each skill as a plain ``.md`` file under ``skills/``
+    (e.g. ``skills/investment-research.md``). Those files are NOT registered as
+    Claude slash commands, so ``claude -p "/investment-research ..."`` fails with
+    "Unknown command: /investment-research" (the bug that made the bridge save and
+    push placeholder text while still logging success). Instead of invoking a slash
+    command, read the file and inline it at the front of the prompt.
+
+    Returns the raw skill text, or ``None`` if no matching skill file is found.
+    """
+    skills_dir = Path(ai_berkshire_path) / "skills"
+    candidates = [
+        skills_dir / f"{skill}.md",
+        skills_dir / f"{skill}.skill.md",
+    ]
+    for path in candidates:
+        if path.is_file():
+            logger.debug("Inlining skill file: %s", path)
+            return path.read_text(encoding="utf-8")
+    logger.warning("No skill file found for '%s' in %s", skill, skills_dir)
+    return None
+
+
 def invoke_ai_berkshire_research(
     stock_code: str,
     stock_name: str,
@@ -477,8 +508,23 @@ def invoke_ai_berkshire_research(
     if not shutil_which(claude_path):
         return False, f"Claude CLI not found: {claude_path}"
 
-    # Build the prompt — reference the skill at the start
-    prompt = f"/{skill}\n\n{question}"
+    # Build the prompt — inline the skill file contents (avoid /skill slash-command
+    # lookup, which fails with "Unknown command" because these skills are plain .md
+    # files under skills/, not registered CLI commands).
+    skill_text = load_skill_prompt(skill, ai_berkshire_path)
+    if skill_text:
+        prompt = (
+            skill_text.replace("$ARGUMENTS", f"{stock_code} {stock_name}")
+            + "\n\n---\n\n"
+            + question
+            + "\n\n# 输出格式要求（覆盖上面 skill 的写文件要求）\n"
+            "请在本次回复中输出完整的研究报告全文（Markdown）。"
+            "不要写入任何独立的 .md 文件（忽略 skill 中把报告写到 ~/[公司名]投资研究报告.md 的\n"
+            "要求），也不要只给摘要——完整报告内容必须全部出现在本条回复中，"
+            "以便直接保存为最终报告。"
+        )
+    else:
+        prompt = question
 
     logger.info(
         "Invoking ai-berkshire (%s) for %s (%s)...",
@@ -499,6 +545,12 @@ def invoke_ai_berkshire_research(
             capture_output=True,
             text=True,
             timeout=timeout,
+            # Run from the ai-berkshire root: the inlined skill text refers to
+            # sibling skill files by relative path (e.g. "skills/financial-data.md"
+            # for the two-source cross-validation spec). --add-dir only grants
+            # read access, it does not change the base for relative paths, so
+            # without this the referenced spec silently fails to resolve.
+            cwd=str(berkshire_dir),
             env={
                 **os.environ,
                 "CLAUDE_CODE_SIMPLE": "1",
@@ -581,8 +633,10 @@ def run_pipeline(
     skill: str = DEFAULT_SKILL,
     ai_berkshire_path: str = DEFAULT_AI_BERKSHIRE_PATH,
     claude_cli: str = DEFAULT_CLAUDE_CLI,
+    timeout: int = DEFAULT_CLAUDE_TIMEOUT,
     dry_run: bool = False,
     feishu_webhook: Optional[str] = None,
+    push_research: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run the full bridge pipeline for a list of stocks.
 
@@ -621,6 +675,7 @@ def run_pipeline(
             skill=skill,
             ai_berkshire_path=ai_berkshire_path,
             claude_cli=claude_cli,
+            timeout=timeout,
         )
 
         if success:
@@ -642,8 +697,10 @@ def run_pipeline(
             }
             results.append(result_entry)
 
-            # Send Feishu notification
-            if feishu_webhook:
+            # Send Feishu notification — only the per-stock research detail when
+            # push_research is enabled. By default the bridge sends ONLY the compact
+            # signal summary (the start-of-run message), keeping Feishu light.
+            if feishu_webhook and push_research:
                 title = f"🔬 深度研究：{name} ({code})"
                 feishu_content = (
                     f"**股票**: {name} ({code})\n"
@@ -651,7 +708,7 @@ def run_pipeline(
                     f"**信号**: {'📈 看多' if stock.get('signal_type') == 'bullish' else '📉 看空'}\n\n"
                     f"**研究摘要**:\n{report[:3000]}"
                 )
-                _send_feishu_notification(webhook_url, title, feishu_content)
+                _send_feishu_notification(feishu_webhook, title, feishu_content)
         else:
             logger.error("Research failed for %s: %s", code, report[:200])
             results.append({
@@ -725,12 +782,23 @@ def main():
         help="Path to Claude CLI (default: auto-detect)",
     )
     parser.add_argument(
+        "--timeout", type=int,
+        default=int(os.environ.get("BRIDGE_CLAUDE_TIMEOUT", str(DEFAULT_CLAUDE_TIMEOUT))),
+        help=f"Per-stock Claude CLI timeout in seconds (default: {DEFAULT_CLAUDE_TIMEOUT})",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Show what would be researched without executing",
     )
     parser.add_argument(
         "--no-feishu", action="store_true",
         help="Skip Feishu notification",
+    )
+    parser.add_argument(
+        "--push-research", action="store_true",
+        default=os.environ.get("BRIDGE_PUSH_RESEARCH", "0") in ("1", "true", "yes", "on"),
+        help="Also push each stock's full research summary to Feishu "
+             "(default: off — Feishu only gets the compact signal summary)",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -831,8 +899,10 @@ def main():
         skill=args.skill,
         ai_berkshire_path=args.ai_berkshire_path,
         claude_cli=claude_cli,
+        timeout=args.timeout,
         dry_run=args.dry_run,
         feishu_webhook=feishu_webhook,
+        push_research=args.push_research,
     )
 
     # Summary
