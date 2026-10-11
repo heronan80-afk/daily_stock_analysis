@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] MxDataFetcher：配置 `MX_APIKEY` 后作为主要指数行情的最优先数据源（优先级 -2，先于 Tushare），一次妙想查询获取 6 个 A 股指数（含开高低、量额），缺失自动补查，失败回退 Efinance/Akshare；仅用于指数，日线/实时等能力不参与。
 - [新功能] MxSearchProvider：配置 `MX_APIKEY` 后将东方财富妙想资讯搜索接入 SearchService（最优先数据源），大盘复盘"消息催化"与个股资讯搜索不再依赖 Bocha/Tavily 配额（余额不足时新闻曾长期为空）；CN 复盘新闻查询词同步改为实时市场新闻风格。
 - [修复] 大盘复盘指数缺失：`TushareFetcher.get_main_indices` 部分限频结果（仅取到上证指数）改为返回 `None` 走 fallback 链，并重启长驻调度器使 8/27 修复生效，复盘指数表恢复完整 6 指数。
+- [修复] MxDataFetcher 指数行情字段静默丢失：妙想「行名（headName）为指数名」的多指数响应形态未被识别，导致同一张表里除第 0 行外的指数被整段丢弃（表现为指数表 `开盘` 6 个里 4 个、`振幅` 6 个全部渲染成 `N/A`，因该数据源优先级最高会屏蔽兜底源）；补上该形态解析、`_to_point` 支持「万/亿」中文单位（如 `1.228万`），查询词补 `振幅`。注意妙想对 `toolQuery` 措辞极敏感，加「昨收」「涨跌额」会让接口改吐沪深300 成分股表，故不加。新增 `tests/test_mxdata_fetcher.py` 覆盖三种响应形态。
 - [测试] 新增 `tests/test_periodic_review.py`
 - [改进] 买入信号因资金流数据缺失被降级为持有时，同步将趋势方向置为「震荡」，避免「看多+观望」的矛盾信号误导用户。
 - [改进] 资金流缺失时买入降级后的评分上限从 59 降至 50，使评分更准确地反映真实置信度（中性而非偏多）。

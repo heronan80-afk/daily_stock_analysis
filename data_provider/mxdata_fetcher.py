@@ -38,8 +38,10 @@ _CN_MAIN_INDICES = (
     ("沪深300", "000300.SH", "sh000300"),
 )
 
-# 查询时附带的指标列，尽量在一次调用内拿全表格所需字段
-_INDICATOR_QUERY = "最新价 涨跌幅 今开 最高 最低 成交量 成交额"
+# 查询时附带的指标列，尽量在一次调用内拿全表格所需字段。
+# 注意：妙想对 toolQuery 的措辞极敏感，多写「昨收」「涨跌额」会让它改吐沪深300
+# 成分股表（几百行证券代码）而丢掉指数行情；「振幅」是实测安全的，勿再随手加词。
+_INDICATOR_QUERY = "最新价 涨跌幅 今开 最高 最低 振幅 成交量 成交额"
 
 
 def _match_cn_index(text: str) -> Optional[Tuple[str, str, str]]:
@@ -70,13 +72,8 @@ def _to_pct(value: Any) -> float:
 
 
 def _to_point(value: Any) -> float:
-    """'3952.179点' -> 3952.179"""
-    if value is None:
-        return 0.0
-    s = str(value).strip().replace("点", "").strip()
-    if not s or s in ("-", "None", "nan"):
-        return 0.0
-    return _to_num(s)
+    """'3952.179点' -> 3952.179；'1.256万' -> 12560.0（指数点位也会带中文单位）"""
+    return _parse_cn_number(value, ("点",), {"万亿": 1e12, "亿": 1e8, "万": 1e4})
 
 
 def _parse_cn_number(value: Any, unit_words: Tuple[str, ...], mult_map: Dict[str, float]) -> float:
@@ -250,7 +247,29 @@ class MxDataFetcher(BaseFetcher):
                 out.setdefault(name, {})[field] = _first_value(table.get(key))
             return
 
-        # 形态 B：单指数（标题带指数名），列为指标编码
+        # 形态 B：行名（headName）为指数名、列为指标 —— 一次查询拿多指数多指标。
+        # 关键：指数名在 headName 的「值」里，不在列名里，所以上面按列名的探测
+        # 认不出来。漏了这一支时每个 DTO 只会按 title 取第 0 行，同表其余指数被
+        # 静默丢弃（曾导致开盘/最高/最低等只剩 1/6 的指数有值）。
+        head_names = table.get("headName")
+        if isinstance(head_names, list) and any(
+            _match_cn_index(str(head)) for head in head_names
+        ):
+            for key in keys:
+                field = _indicator_field(str(name_map.get(str(key), str(key))))
+                if field is None:
+                    continue
+                column = table.get(key)
+                if not isinstance(column, list):
+                    continue
+                for row, head in enumerate(head_names):
+                    matched_row = _match_cn_index(str(head))
+                    if not matched_row or row >= len(column):
+                        continue
+                    out.setdefault(matched_row[0], {})[field] = column[row]
+            return
+
+        # 形态 C：单指数（标题带指数名），列为指标编码
         matched = _match_cn_index(dto.get("title") or dto.get("entityName") or "")
         if not matched:
             return
