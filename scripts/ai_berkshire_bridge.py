@@ -484,6 +484,25 @@ def load_skill_prompt(
     return None
 
 
+_API_ERROR_MARKERS = (
+    "api error:",
+    "request rejected",
+    "usage quota",
+    "rate limit exceeded",
+    "too many requests",
+)
+
+
+def _looks_like_api_error(text: str) -> bool:
+    """True when the CLI's output is an API/quota error rather than a report.
+
+    Only the head is inspected: a real report may quote an error later on, but
+    the CLI prints transport/quota failures as the very first line.
+    """
+    head = text.lstrip()[:500].lower()
+    return any(marker in head for marker in _API_ERROR_MARKERS)
+
+
 def invoke_ai_berkshire_research(
     stock_code: str,
     stock_name: str,
@@ -557,23 +576,28 @@ def invoke_ai_berkshire_research(
             },
         )
 
+        output = result.stdout.strip()
         if result.returncode != 0:
             stderr = result.stderr.strip() or "Unknown error"
             logger.warning(
                 "Claude CLI returned code %d for %s: %s",
                 result.returncode, stock_code, stderr[:500],
             )
-            # Return partial output if any
-            output = result.stdout.strip()
-            if output:
+            # A non-zero exit usually still leaves the quota/rate-limit error on
+            # stdout. Saving that as a research report marks a failed run as a
+            # success (seen on 2026-10-28: a 484-byte 429 payload was archived
+            # as 深南电路's report). Keep genuine partial output, reject errors.
+            if output and not _looks_like_api_error(output):
                 return True, output
-            return False, f"Claude CLI failed (exit={result.returncode}): {stderr[:500]}"
+            detail = output[:300] if output else stderr[:500]
+            return False, f"Claude CLI failed (exit={result.returncode}): {detail}"
 
-        report = result.stdout.strip()
-        if not report:
+        if not output:
             return False, f"Claude CLI returned empty output for {stock_code}"
+        if _looks_like_api_error(output):
+            return False, f"Claude CLI returned an API error for {stock_code}: {output[:300]}"
 
-        return True, report
+        return True, output
 
     except subprocess.TimeoutExpired:
         logger.warning("Claude CLI timed out (%ds) for %s", timeout, stock_code)
