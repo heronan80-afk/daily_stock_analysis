@@ -741,6 +741,15 @@ def run_pipeline(
                 "status": "failed",
                 "error": report[:500],
             })
+            # A quota/rate-limit failure will fail every remaining stock too, and
+            # each attempt still costs a CLI start plus a few minutes. Stop the
+            # run instead of grinding through them.
+            if _looks_like_api_error(report):
+                logger.error(
+                    "Quota/API error detected — aborting the remaining %d stock(s)",
+                    len(stocks) - i - 1,
+                )
+                break
 
         # Rate limit: small delay between research calls
         if i < len(stocks) - 1:

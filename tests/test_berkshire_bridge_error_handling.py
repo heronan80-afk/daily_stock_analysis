@@ -83,3 +83,51 @@ def test_invoke_keeps_genuine_partial_report_on_nonzero_exit(monkeypatch, tmp_pa
 
     assert ok
     assert report.startswith("# 深度研究")
+
+
+def _stock(code: str) -> dict:
+    return {"code": code, "name": code, "score": 80, "signal_type": "bullish"}
+
+
+def test_run_pipeline_aborts_remaining_stocks_on_quota_error(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_invoke(stock_code, stock_name, question, **kwargs):
+        calls.append(stock_code)
+        return False, (
+            "Claude CLI failed (exit=1): "
+            "API Error: Request rejected (429) · You have exceeded the 5-hour usage quota."
+        )
+
+    monkeypatch.setattr(bridge, "invoke_ai_berkshire_research", fake_invoke)
+    monkeypatch.setattr(bridge.time, "sleep", lambda _s: None)
+
+    results = bridge.run_pipeline(
+        stocks=[_stock("000001"), _stock("000002"), _stock("000003")],
+        ai_berkshire_path=str(tmp_path),
+    )
+
+    assert calls == ["000001"]
+    assert len(results) == 1
+    assert results[0]["status"] == "failed"
+
+
+def test_run_pipeline_continues_after_a_non_quota_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_invoke(stock_code, stock_name, question, **kwargs):
+        calls.append(stock_code)
+        if stock_code == "000001":
+            return False, "Research timed out after 900s for 000001"
+        return True, "# 深度研究\n\n正文"
+
+    monkeypatch.setattr(bridge, "invoke_ai_berkshire_research", fake_invoke)
+    monkeypatch.setattr(bridge.time, "sleep", lambda _s: None)
+
+    results = bridge.run_pipeline(
+        stocks=[_stock("000001"), _stock("000002")],
+        ai_berkshire_path=str(tmp_path),
+    )
+
+    assert calls == ["000001", "000002"]
+    assert [r["status"] for r in results] == ["failed", "success"]

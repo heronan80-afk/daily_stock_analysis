@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [chore] Kronos 模型源码从易失的 `/tmp/Kronos` 迁移到持久目录 `~/kronos/Kronos`（`kronos_service.py`/`kronos_base_compare.py` 默认值与 `kronos_eval.py`/`kronos_sweep.py`/`run_kronos_eval.py`/`kronos_test/kronos_report.py` 路径同步更新，均支持 `KRONOS_PATH` 环境变量覆盖），避免 `/tmp` 被系统清理后模型丢失。
 - [修复] A股板块报告交易日检查：`SectorAnalysisService.is_trading_day()` 原先只判断周末（`weekday() < 5`），法定节假日落在工作日时（如国庆 10/1-10/7）仍会照常取数并推送报告；改为复用项目统一交易日历 `src/core/trading_calendar`（exchange-calendars XSHG，与 `main.py` 同一口径，覆盖节假日与调休），日历不可用或日期超出范围时 fail-open 并保留周末判断；检查点前移至取数之前，非交易日不取数、不出报告、不推送。
 - [修复] ai-berkshire bridge 把 Claude CLI 的额度/限流错误当成成功报告：非零退出码时只要 stdout 非空就返回成功，2026-10-28 深南电路把 484 字节的 `API Error: Request rejected (429)` 存档为研究报告，同时日志仍报 `Success: 4`。现按输出开头的 `API Error` / `Request rejected` / `usage quota` / `rate limit` 判为失败，真实截断的部分报告仍保留；新增 `tests/test_berkshire_bridge_error_handling.py`。
+- [改进] ai-berkshire bridge 遇到 429/额度错误立即中止本轮剩余股票：此前首只失败后仍会对每只剩余股票再启动一次 CLI、等几分钟再失败，白耗额度与时间；现在首个额度错误即停止，并把该只如实记为 failed。新增 2 个 `run_pipeline` 回归测试。
 
 ## [3.25.0] - 2026-07-03
 
